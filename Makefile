@@ -18,13 +18,18 @@ SRCDIR      := src
 OBJDIR      := build
 
 # --- Version -----------------------------------------------------------------
-# Si se pasa VERSION=1.2.3 se divide en mayor/menor/parche.
-VERSION ?= 1.0.0
-VMAJ := $(word 1,$(subst ., ,$(VERSION)))
-VMIN := $(word 2,$(subst ., ,$(VERSION)))
-VPAT := $(word 3,$(subst ., ,$(VERSION)))
-VFLAGS := -DWSCAMP_VERSION_MAJOR=$(VMAJ) -DWSCAMP_VERSION_MINOR=$(VMIN) \
-          -DWSCAMP_VERSION_PATCH=$(if $(VPAT),$(VPAT),0)
+# src/version.h es la fuente unica de verdad. Si se pasa VERSION=1.2.3 se usa
+# ese valor en lugar del fichero.
+ifneq ($(origin VERSION),undefined)
+  VMAJ := $(word 1,$(subst ., ,$(VERSION)))
+  VMIN := $(word 2,$(subst ., ,$(VERSION)))
+  VPAT := $(word 3,$(subst ., ,$(VERSION)))
+  VFLAGS := -DWSCAMP_VERSION_MAJOR=$(VMAJ) -DWSCAMP_VERSION_MINOR=$(VMIN) \
+            -DWSCAMP_VERSION_PATCH=$(if $(VPAT),$(VPAT),0)
+else
+  VERSION := $(shell sed -n 's/^#define WSCAMP_VERSION_MAJOR \([0-9]*\)/\1/p' src/version.h | head -1).$(shell sed -n 's/^#define WSCAMP_VERSION_MINOR \([0-9]*\)/\1/p' src/version.h | head -1).$(shell sed -n 's/^#define WSCAMP_VERSION_PATCH \([0-9]*\)/\1/p' src/version.h | head -1)
+  VFLAGS :=
+endif
 
 # --- Toolchain ---------------------------------------------------------------
 CXXFLAGS_COMMON := -std=c++17 -O2 -Wall -Wextra -Isrc $(VFLAGS)
