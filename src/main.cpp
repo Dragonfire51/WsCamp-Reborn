@@ -41,7 +41,6 @@ static bool              g_paused      = false;
 
 // Video
 static enum retro_pixel_format g_pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
-static unsigned          g_rotation    = 0;      // 0, 90, 180, 270
 static std::vector<uint32_t> g_display;          // ARGB8888 listo para SDL
 static unsigned          g_display_w = 0, g_display_h = 0;
 static bool              g_have_frame = false;
@@ -71,6 +70,16 @@ static Uint32            g_status_until = 0;
 
 // Mapeo de teclas
 static int               g_capture_button = -1;  // boton que espera una tecla
+
+// Volteo de la ventana completa (F1). Se dibuja todo en esta textura y luego
+// se presenta girada 180 grados, de modo que tambien giran el menu y el
+// explorador. Solo existe mientras el volteo esta activo.
+static SDL_Texture      *g_flip_target   = nullptr;
+static int               g_flip_w = 0, g_flip_h = 0;
+
+// Ultimo tamano base con el que se ajusto la ventana; sirve para reaccionar
+// cuando el nucleo cambia de orientacion (juegos verticales).
+static unsigned          g_sized_base_w = 0, g_sized_base_h = 0;
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -238,7 +247,7 @@ static void VideoRefresh(const void *data, unsigned width, unsigned height, size
         // El nucleo reutiliza el frame anterior (dupe).
         return;
     }
-    ConvertFrame(data, width, height, pitch, g_pixel_format, g_rotation,
+    ConvertFrame(data, width, height, pitch, g_pixel_format, 0,
                  g_display, g_display_w, g_display_h);
     g_have_frame = true;
 }
@@ -287,6 +296,8 @@ static const char *OptionValue(const char *key) {
     if (strcmp(key, "wswan_sound_noise") == 0) return g_cfg.sound[SND_NOISE] ? "enabled" : "disabled";
     if (strcmp(key, "wswan_sound_pcm") == 0)   return g_cfg.sound[SND_PCM]   ? "enabled" : "disabled";
     if (strcmp(key, "wswan_sound_dma") == 0)   return g_cfg.sound[SND_DMA]   ? "enabled" : "disabled";
+    if (strcmp(key, "wswan_rotate_display") == 0) return RotationName(g_cfg.rotate);
+    if (strcmp(key, "wswan_60hz_mode") == 0)   return g_cfg.mode_60hz ? "enabled" : "disabled";
     return nullptr;
 }
 
@@ -303,8 +314,13 @@ static bool Environment(unsigned cmd, void *data) {
         return true;
     }
     case RETRO_ENVIRONMENT_SET_ROTATION:
-        g_rotation = *reinterpret_cast<const unsigned *>(data);
-        return true;
+        // Se responde que no: asi el nucleo rota el fotograma el mismo (es la
+        // ruta que usa con los frontends sin rotacion por hardware) y lo
+        // entrega ya con la geometria definitiva, 144x224 en vertical. Si se
+        // aceptara, el nucleo delegaria en el frontend y habria que replicar
+        // su convencion de giro (0/1/2/3 = 0/90/180/270), con riesgo de
+        // dejarlo invertido.
+        return false;
 
     case RETRO_ENVIRONMENT_GET_OVERSCAN:
         *reinterpret_cast<bool *>(data) = false;
@@ -370,7 +386,16 @@ static bool Environment(unsigned cmd, void *data) {
         *reinterpret_cast<unsigned *>(data) = 0;   // interfaz clasica (SET_VARIABLES)
         return true;
 
-    case RETRO_ENVIRONMENT_SET_GEOMETRY:
+    case RETRO_ENVIRONMENT_SET_GEOMETRY: {
+        // Solo trae geometria. Leerlo como av_info completo machacaria fps y
+        // sample_rate con basura, asi que se copia unicamente el bloque de
+        // geometria y se deja intacto el resto.
+        const struct retro_game_geometry *geo =
+            reinterpret_cast<const struct retro_game_geometry *>(data);
+        if (geo)
+            g_av.geometry = *geo;
+        return true;
+    }
     case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO: {
         const struct retro_system_av_info *av =
             reinterpret_cast<const struct retro_system_av_info *>(data);
@@ -874,7 +899,16 @@ static std::vector<MenuItem> SubMenuItems(int submenu) {
         items.push_back(Checked("Zoom 3x", CMD_VIDEO_ZOOM_3, g_cfg.zoom == 3));
         items.push_back(Checked("Zoom 4x", CMD_VIDEO_ZOOM_4, g_cfg.zoom == 4));
         items.push_back(Separator());
-        items.push_back(Checked("Voltear imagen  (F1)", CMD_VIDEO_FLIP, g_cfg.flip));
+        items.push_back(Checked("Voltear ventana  (F1)", CMD_VIDEO_FLIP, g_cfg.flip));
+        items.push_back(Separator());
+        items.push_back(Checked("Orientacion: manual", CMD_VIDEO_ROT_BASE + ROT_MANUAL,
+                                g_cfg.rotate == ROT_MANUAL));
+        items.push_back(Checked("Orientacion: vertical", CMD_VIDEO_ROT_BASE + ROT_PORTRAIT,
+                                g_cfg.rotate == ROT_PORTRAIT));
+        items.push_back(Checked("Orientacion: horizontal", CMD_VIDEO_ROT_BASE + ROT_LANDSCAPE,
+                                g_cfg.rotate == ROT_LANDSCAPE));
+        items.push_back(Separator());
+        items.push_back(Checked("Modo 60 Hz", CMD_VIDEO_60HZ, g_cfg.mode_60hz));
         break;
     case SUB_SOUND:
         items.push_back(Checked("Silencio general", CMD_SOUND_MASTER, !g_cfg.master));
@@ -922,9 +956,6 @@ static void ApplyWindowSize() {
         base_w = g_av.geometry.base_width;
         base_h = g_av.geometry.base_height;
     }
-    if (g_rotation == 90 || g_rotation == 270)
-        std::swap(base_w, base_h);
-
     SDL_SetWindowSize(g_window,
                       (int)base_w * g_cfg.zoom,
                       (int)base_h * g_cfg.zoom + MENUBAR_H);
@@ -933,6 +964,42 @@ static void ApplyWindowSize() {
 static void SaveConfig() {
     if (!g_config_path.empty())
         g_cfg.Save(g_config_path);
+}
+
+// ---------------------------------------------------------------------------
+// Volteo de la ventana completa
+// ---------------------------------------------------------------------------
+// Con el volteo activo, toda la interfaz se dibuja en una textura del tamano de
+// la ventana y se presenta girada 180 grados. Asi el menu, el explorador y los
+// mensajes giran junto con la imagen del juego.
+static void BeginFrame(int ww, int wh) {
+    if (!g_cfg.flip) {
+        SDL_SetRenderTarget(g_renderer, nullptr);
+        return;
+    }
+
+    if (g_flip_target == nullptr || g_flip_w != ww || g_flip_h != wh) {
+        if (g_flip_target != nullptr)
+            SDL_DestroyTexture(g_flip_target);
+        g_flip_target = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888,
+                                          SDL_TEXTUREACCESS_TARGET, ww, wh);
+        g_flip_w = ww;
+        g_flip_h = wh;
+    }
+    if (g_flip_target == nullptr) {
+        SDL_SetRenderTarget(g_renderer, nullptr);
+        return;
+    }
+    SDL_SetRenderTarget(g_renderer, g_flip_target);
+}
+
+static void EndFrame() {
+    if (g_cfg.flip && g_flip_target != nullptr) {
+        SDL_SetRenderTarget(g_renderer, nullptr);
+        SDL_RenderCopyEx(g_renderer, g_flip_target, nullptr, nullptr, 180.0,
+                         nullptr, SDL_FLIP_NONE);
+    }
+    SDL_RenderPresent(g_renderer);
 }
 
 static void ExecuteCommand(int cmd);
@@ -1181,9 +1248,8 @@ static void HandleKeyDown(const SDL_KeyboardEvent &k) {
     // Volteo de la imagen: la tecla configurada (F1 por defecto).
     if (k.keysym.scancode == g_cfg.key_flip && g_menu_open < 0) {
         g_cfg.flip = !g_cfg.flip;
-        g_rotation = g_cfg.flip ? 180u : 0u;
         SaveConfig();
-        SetStatus(g_cfg.flip ? "Imagen volteada" : "Imagen normal");
+        SetStatus(g_cfg.flip ? "Ventana volteada" : "Ventana normal");
         return;
     }
 
@@ -1349,9 +1415,23 @@ static void ExecuteCommand(int cmd) {
         SetStatus("Zoom " + std::to_string(g_cfg.zoom) + "x");
     } else if (cmd == CMD_VIDEO_FLIP) {
         g_cfg.flip = !g_cfg.flip;
-        g_rotation = g_cfg.flip ? 180u : 0u;
         SaveConfig();
-        SetStatus(g_cfg.flip ? "Imagen volteada" : "Imagen normal");
+        SetStatus(g_cfg.flip ? "Ventana volteada" : "Ventana normal");
+    } else if (cmd >= CMD_VIDEO_ROT_BASE &&
+               cmd < CMD_VIDEO_ROT_BASE + 3) {
+        g_cfg.rotate = cmd - CMD_VIDEO_ROT_BASE;
+        // El nucleo vuelve a leer las opciones al ver el aviso y cambia la
+        // orientacion el solo (SET_GEOMETRY / SET_ROTATION).
+        g_options_dirty = true;
+        SaveConfig();
+        const char *nombres[] = { "manual", "vertical", "horizontal" };
+        SetStatus(std::string("Orientacion: ") + nombres[g_cfg.rotate]);
+    } else if (cmd == CMD_VIDEO_60HZ) {
+        g_cfg.mode_60hz = !g_cfg.mode_60hz;
+        g_options_dirty = true;
+        SaveConfig();
+        SetStatus(g_cfg.mode_60hz ? "Modo 60 Hz activado"
+                                  : "Modo 60 Hz desactivado (75 Hz)");
     } else if (cmd == CMD_SOUND_MASTER) {
         g_cfg.master = !g_cfg.master;
         g_options_dirty = true;
@@ -1465,7 +1545,6 @@ int main(int argc, char *argv[]) {
     // La configuracion se lee antes de crear la ventana: el zoom decide su
     // tamano inicial.
     g_cfg.Load(g_config_path);
-    g_rotation = g_cfg.flip ? 180u : 0u;
 
     if (argc > 2 && strcmp(argv[1], "--selftest") == 0) {
         int rc = SelfTest(argv[2]);
@@ -1508,8 +1587,14 @@ int main(int argc, char *argv[]) {
     if (argc > 1)
         LoadGame(argv[1]);
 
-    double fps = 60.0;
-    Uint64 next_frame = SDL_GetTicks64();
+    // El nucleo emite a su propia frecuencia (el WonderSwan va a 75,47 Hz, no a
+    // 60). Presentar una vez por fotograma emulado ata la velocidad al refresco
+    // del monitor: con vsync a 60 Hz el juego correria al 79%. En su lugar se
+    // cuenta el tiempo real transcurrido y se ejecutan los retro_run que
+    // correspondan; la presentacion sigue el ritmo del monitor.
+    double  fps         = 60.0;
+    double  frame_accum = 0.0;
+    Uint64  last_tick   = SDL_GetTicks64();
 
     while (g_running) {
         SDL_Event ev;
@@ -1524,8 +1609,17 @@ int main(int argc, char *argv[]) {
                 break;
             case SDL_MOUSEBUTTONDOWN:
                 if (ev.button.button == SDL_BUTTON_LEFT) {
-                    if (g_browsing) HandleBrowserMouse(ev.button);
-                    else            HandleMouseDown(ev.button);
+                    // Con el volteo activo la ventana se presenta girada, asi
+                    // que la posicion del raton se refleja antes de usarla.
+                    SDL_MouseButtonEvent b = ev.button;
+                    if (g_cfg.flip) {
+                        int ww = 0, wh = 0;
+                        SDL_GetWindowSize(g_window, &ww, &wh);
+                        b.x = ww - 1 - b.x;
+                        b.y = wh - 1 - b.y;
+                    }
+                    if (g_browsing) HandleBrowserMouse(b);
+                    else            HandleMouseDown(b);
                 }
                 break;
             default:
@@ -1535,36 +1629,62 @@ int main(int argc, char *argv[]) {
         if (!g_running)
             break;
 
-        if (g_game_loaded && !g_paused && !g_browsing && g_menu_open < 0) {
-            g_core.retro_run();
+        bool running_emu = g_game_loaded && !g_paused && !g_browsing && g_menu_open < 0;
+
+        if (running_emu) {
             fps = (g_av.timing.fps > 0.0) ? g_av.timing.fps : 60.0;
+
+            Uint64 now = SDL_GetTicks64();
+            frame_accum += (double)(now - last_tick) * fps / 1000.0;
+            last_tick = now;
+
+            int to_run = (int)frame_accum;
+            frame_accum -= to_run;
+            if (to_run > 4) {
+                // Muy por detras (ventana movida, carga del sistema): se
+                // descarta el retraso en lugar de encadenar emulacion.
+                to_run      = 4;
+                frame_accum = 0.0;
+            }
+            for (int i = 0; i < to_run; ++i)
+                g_core.retro_run();
+        } else {
+            last_tick   = SDL_GetTicks64();
+            frame_accum = 0.0;
         }
 
         int ww = 0, wh = 0;
         SDL_GetWindowSize(g_window, &ww, &wh);
 
+        // El nucleo puede cambiar de orientacion al vuelo (juegos verticales):
+        // si la geometria base ya no coincide con la ultima usada, se reajusta
+        // la ventana para que la imagen no quede recortada.
+        unsigned bw = (g_av.geometry.base_width  > 0) ? g_av.geometry.base_width  : 224;
+        unsigned bh = (g_av.geometry.base_height > 0) ? g_av.geometry.base_height : 144;
+        if (bw != g_sized_base_w || bh != g_sized_base_h) {
+            g_sized_base_w = bw;
+            g_sized_base_h = bh;
+            ApplyWindowSize();
+        }
+
+        BeginFrame(ww, wh);
         if (g_browsing) {
             RenderBrowser(ww, wh);
         } else {
             RenderEmulator(ww, wh);
             RenderMenuDropdown();
         }
-        SDL_RenderPresent(g_renderer);
+        EndFrame();
 
-        // Sincronizacion de frames.
-        if (g_game_loaded && !g_paused && !g_browsing && g_menu_open < 0) {
-            double frame_ms = 1000.0 / fps;
-            next_frame += (Uint64)frame_ms;
+        // Con la emulacion en marcha el ritmo lo marca el vsync de la
+        // presentacion; en pausa o en los menus se limita a ~60 Hz para no
+        // consumir CPU girando en vacio.
+        if (!running_emu) {
             Uint64 now = SDL_GetTicks64();
-            if (next_frame > now) {
-                Uint32 wait = (Uint32)(next_frame - now);
-                if (wait > 1) SDL_Delay(wait);
-            } else if (now - next_frame > (Uint64)(frame_ms * 4)) {
-                next_frame = now;   // se ha quedado atras: resincroniza
-            }
-        } else {
-            next_frame = SDL_GetTicks64();
-            SDL_Delay(16);
+            Uint64 spent = now - last_tick;
+            if (spent < 16)
+                SDL_Delay((Uint32)(16 - spent));
+            last_tick = SDL_GetTicks64();
         }
     }
 

@@ -120,7 +120,8 @@ Linux/macOS instala SDL2 con el gestor de paquetes.
 - **Archivo -> Abrir ROM...** (Ctrl+O): explorador integrado de `.ws` / `.wsc`
 - **Estado -> Guardar/Cargar estado 0..9**: 10 ranuras en `saves/slotNN.sts`
 - **Emulacion -> Reiniciar / Pausa** (Espacio)
-- **Opciones -> Video**: zoom 1x..4x y volteo de imagen (F1)
+- **Opciones -> Video**: zoom 1x..4x, volteo de la ventana entera (F1),
+  orientacion de la pantalla (manual, vertical u horizontal) y modo 60 Hz
 - **Opciones -> Sonido**: silencio general y canal a canal (1..4, ruido, PCM y
   DMA); requiere el nucleo de `make core`
 - **Opciones -> Controles**: remapeo de botones y restauracion de los valores
@@ -131,17 +132,47 @@ Linux/macOS instala SDL2 con el gestor de paquetes.
 Todo lo elegido en el menu se guarda en `WsCampReborn.ini`, junto al
 ejecutable, y se recupera al arrancar.
 
+### Orientacion de la pantalla
+
+El WonderSwan emite a 75,47 Hz y dibuja 224x144. Los juegos disenados en
+vertical, como **Wonder Classic** o **Digimon Digital Monsters**, esperan una
+pantalla de 144x224, asi que en horizontal salen girados o recortados.
+
+**Opciones -> Video -> Orientacion** elige que le pide el emulador al nucleo:
+
+| Opcion | Efecto |
+|--------|--------|
+| manual | como el hardware: se gira al pulsar Select (valor por defecto) |
+| vertical | 144x224, para juegos verticales |
+| horizontal | 224x144, para el resto |
+
+Al cambiarla, el nucleo reajusta la ventana y la imagen sola. El ajuste se
+guarda en el INI, de modo que cada juego conserva su orientacion.
+
+El modo 60 Hz hace que el nucleo baje de 75 a 60 Hz descartando uno de cada
+cinco fotogramas. Sirve para pantallas que no aceptan mas de 60 Hz, a costa de
+perder fluidez; no hace falta para la velocidad, que ya es correcta.
+
 ## Pruebas
 
 ```sh
 make core                  # nucleo con control por canal, en lib/
-make test ROM=juego.ws     # video + control por canal + autocomprobacion
+make test ROM=juego.ws     # video, volteo, rotacion, sonido y autocomprobacion
 ```
 
-`make test` comprueba la conversion de color y las cuatro rotaciones, verifica
-que las opciones de canal llegan al nucleo parcheado y ejecuta una
-autocomprobacion completa (carga una ROM, guarda un estado, avanza y lo vuelve a
-cargar). Sin `ROM=` se omiten las pruebas que necesitan un juego.
+`make test` comprueba la conversion de color y las cuatro rotaciones, que el
+volteo gira la ventana entera, que la orientacion llega al nucleo (224x144 en
+horizontal y 144x224 en vertical), que las opciones de canal llegan al nucleo
+parcheado y ejecuta una autocomprobacion completa (carga una ROM, guarda un
+estado, avanza y lo vuelve a cargar). Sin `ROM=` se omiten las pruebas que
+necesitan un juego.
+
+### Velocidad
+
+El nucleo emite a la frecuencia real del WonderSwan, 75,47 Hz, no a 60. El
+bucle de emulacion cuenta el tiempo transcurrido y ejecuta los fotogramas que
+tocan, en lugar de atarse a un fotograma por refresco de pantalla: asi el juego
+va a velocidad real aunque el monitor sea de 60 Hz.
 
 ### Teclas
 
@@ -153,7 +184,7 @@ cargar). Sin `ROM=` se omiten las pruebas que necesitan un juego.
 | Z | B |
 | Enter | Start |
 | Retroceso | Select |
-| F1 | Voltear imagen (configurable) |
+| F1 | Voltear la ventana entera (configurable) |
 | Ctrl+O | Abrir ROM |
 | Espacio | Pausa |
 

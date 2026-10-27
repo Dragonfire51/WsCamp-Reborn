@@ -100,14 +100,20 @@ test: $(TARGET)
 		tests/video_test.cpp $(SRCDIR)/video.cpp -o $(OBJDIR)/video_test $(LDLIBS)
 	$(OBJDIR)/video_test
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Isrc $(PLATFLAGS) \
+		tests/flip_test.cpp -o $(OBJDIR)/flip_test $(LDLIBS)
+	SDL_VIDEODRIVER=dummy $(OBJDIR)/flip_test
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Isrc $(PLATFLAGS) \
 		tests/sound_test.cpp $(SRCDIR)/ws_core.cpp -o $(OBJDIR)/sound_test $(LDLIBS)
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Isrc $(PLATFLAGS) \
+		tests/rotation_test.cpp $(SRCDIR)/ws_core.cpp -o $(OBJDIR)/rotation_test $(LDLIBS)
 	@CORE=$$(ls lib/mednafen_wswan_libretro.* 2>/dev/null | head -1); \
 	if [ -z "$$CORE" ]; then \
-		echo "test: sin nucleo en lib/, se omite sound_test"; \
+		echo "test: sin nucleo en lib/, se omiten sound_test y rotation_test"; \
 	elif [ -n "$(ROM)" ]; then \
 		$(OBJDIR)/sound_test "$$CORE" "$(ROM)"; \
+		SDL_VIDEODRIVER=dummy $(OBJDIR)/rotation_test "$$CORE" "$(ROM)"; \
 	else \
-		echo "test: sin ROM=<ruta>, se omite sound_test"; \
+		echo "test: sin ROM=<ruta>, se omiten sound_test y rotation_test"; \
 	fi
 	@if [ -n "$(ROM)" ]; then \
 		SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \

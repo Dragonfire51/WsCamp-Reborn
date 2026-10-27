@@ -39,6 +39,11 @@ enum MenuCommand {
     CMD_VIDEO_ZOOM_4,
     CMD_VIDEO_FLIP,
 
+    // Orientacion de la pantalla (juegos verticales como Wonder Classic).
+    // Se suman ROT_MANUAL, ROT_PORTRAIT y ROT_LANDSCAPE.
+    CMD_VIDEO_ROT_BASE = 110,
+    CMD_VIDEO_60HZ     = 120,
+
     // Opciones -> Sonido (silencio y canales)
     CMD_SOUND_MASTER = 200,
     CMD_SOUND_CH_BASE,

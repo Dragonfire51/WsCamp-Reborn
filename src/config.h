@@ -38,10 +38,21 @@ enum SoundItem {
     SND_COUNT
 };
 
+// Orientacion que se le pide al nucleo (opcion wswan_rotate_display). Los
+// juegos verticales, como Wonder Classic o Digimon, se disenan para una
+// pantalla de 144x224 y necesitan ROT_PORTRAIT para verse en su sitio.
+enum DisplayRotation {
+    ROT_MANUAL = 0,     // se gira al pulsar Select (por defecto del nucleo)
+    ROT_PORTRAIT,       // juegos verticales
+    ROT_LANDSCAPE       // juegos horizontales
+};
+
 struct Config {
     int          zoom     = 2;      // 1..4
-    bool         flip     = false;  // F1: voltea la imagen 180 grados
+    bool         flip     = false;  // F1: voltea la ventana entera 180 grados
     bool         master   = true;   // silencio general
+    int          rotate   = ROT_MANUAL;
+    bool         mode_60hz = false; // el nucleo baja de 75 a 60 Hz
     bool         sound[SND_COUNT];
     SDL_Scancode bind[WSB_COUNT];
     SDL_Scancode key_flip = SDL_SCANCODE_F1;
@@ -63,4 +74,5 @@ extern bool g_options_dirty;
 const char *WsButtonName(int b);
 unsigned    WsButtonRetroId(int b);
 const char *SoundItemName(int i);
+const char *RotationName(int r);
 std::string KeyDisplayName(SDL_Scancode sc);

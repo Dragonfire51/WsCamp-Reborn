@@ -10,7 +10,7 @@ make                       # plataforma actual
 make CROSS=x86_64          # Windows 64 bits (MinGW-w64)
 make CROSS=i686            # Windows 32 bits (MinGW-w64)
 make core                  # nucleo con control por canal, en lib/
-make test ROM=juego.ws     # video + control por canal + autocomprobacion
+make test ROM=juego.ws     # video, volteo, rotacion, sonido y autocomprobacion
 ```
 
 En un contenedor Linux hacen falta `libsdl2-dev`, `g++-mingw-w64-x86-64` y
@@ -43,6 +43,36 @@ Dos trampas al tocar el parche:
 Sin el nucleo parcheado el emulador funciona igual, pero las opciones de canal
 no tienen efecto; `sound_test` lo detecta y se marca como omitida.
 
+## Bucle de emulacion
+
+El WonderSwan emite a 75,47 Hz, no a 60. El bucle no puede presentar una vez por
+fotograma emulado: con vsync a 60 Hz eso ataria la emulacion al monitor y el
+juego correria al 79%. En su lugar acumula el tiempo real transcurrido
+(`frame_accum`) y ejecuta los `retro_run` que correspondan, dejando que la
+presentacion siga el ritmo del monitor. Si se toca el bucle, hay que conservar
+ese desacople; medirlo es facil con un contador de `retro_run` durante un par de
+segundos (debe dar ~75/s, no ~60/s).
+
+El nucleo tarda ~0,3 ms por fotograma (mas de 3000 fps de margen), asi que la
+emulacion nunca es el cuello de botella.
+
+## Volteo y orientacion
+
+Son dos cosas distintas y conviene no mezclarlas:
+
+- El volteo (F1, `g_cfg.flip`) gira **la ventana entera** 180 grados. Se aplica
+  al presentar: `BeginFrame` redirige el dibujo a una textura y `EndFrame` la
+  presenta con `SDL_RenderCopyEx`. Por eso el menu y el explorador tambien
+  giran, y por eso las coordenadas del raton se reflejan antes de usarlas.
+- La orientacion (`g_cfg.rotate`) es la opcion `wswan_rotate_display` del
+  nucleo. En vertical entrega 144x224 y en horizontal 224x144.
+
+El frontend **rechaza** `RETRO_ENVIRONMENT_SET_ROTATION` a proposito: asi el
+nucleo rota el fotograma el mismo en software y lo entrega ya en su sitio. Si se
+aceptara, el nucleo delegaria en el frontend y habria que replicar su
+codificacion de giro (0/1/2/3, no grados) con riesgo de dejarlo invertido.
+Cuando el nucleo cambia de geometria, el bucle lo detecta y reajusta la ventana.
+
 ## Convenciones
 
 - Identificadores y nombres de fichero sin tildes ni enes (ASCII), tambien en
@@ -50,6 +80,17 @@ no tienen efecto; `sound_test` lo detecta y se marca como omitida.
 - La version vive solo en `src/version.h`. El CI la pasa con `-D` y de ahi
   salen el titulo, el dialogo "Acerca de..." y el nombre del release.
 - `WsCampReborn.ini` guarda las opciones del menu y se relee al arrancar.
+
+## Trampas ya encontradas
+
+- `RETRO_ENVIRONMENT_SET_GEOMETRY` solo trae `retro_game_geometry`, no un
+  `retro_system_av_info`. Leerlo como este ultimo machaca `fps` y
+  `sample_rate` con basura.
+- Un `Environment` que devuelve `true` a comandos desconocidos hace que el
+  nucleo use punteros basura (el de log, por ejemplo) y segfaulta. Devolver
+  `false` en el `default`.
+- El Makefile usa tabuladores reales en las recetas. Un reemplazo de texto que
+  use espacios no encaja y falla en silencio.
 
 ## CI
 

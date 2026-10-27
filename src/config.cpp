@@ -84,6 +84,8 @@ void Config::Reset() {
     zoom     = 2;
     flip     = false;
     master   = true;
+    rotate   = ROT_MANUAL;
+    mode_60hz = false;
     key_flip = SDL_SCANCODE_F1;
     for (int i = 0; i < SND_COUNT; ++i)
         sound[i] = true;
@@ -133,7 +135,13 @@ void Config::Load(const std::string &path) {
     if (zoom < 1) zoom = 1;
     if (zoom > 4) zoom = 4;
     flip     = ParseBool(get("video.flip", "0"), false);
+    mode_60hz = ParseBool(get("video.mode_60hz", "0"), false);
     key_flip = ParseKey(get("video.flip_key", "F1"));
+
+    rotate = ROT_MANUAL;
+    std::string rot = get("video.rotate", "manual");
+    if (rot == "portrait")       rotate = ROT_PORTRAIT;
+    else if (rot == "landscape") rotate = ROT_LANDSCAPE;
 
     master = ParseBool(get("sound.master", "1"), true);
     for (int i = 0; i < SND_COUNT; ++i) {
@@ -162,6 +170,8 @@ void Config::Save(const std::string &path) const {
     fprintf(f, "[Video]\n");
     fprintf(f, "zoom = %d\n", zoom);
     fprintf(f, "flip = %d\n", flip ? 1 : 0);
+    fprintf(f, "mode_60hz = %d\n", mode_60hz ? 1 : 0);
+    fprintf(f, "rotate = %s\n", RotationName(rotate));
     fprintf(f, "flip_key = %s\n\n", SDL_GetScancodeName(key_flip));
 
     fprintf(f, "[Sound]\n");
@@ -187,6 +197,14 @@ unsigned WsButtonRetroId(int b) {
     if (b < 0 || b >= WSB_COUNT)
         return 0xFFFFFFFFu;
     return BUTTONS[b].retro_id;
+}
+
+const char *RotationName(int r) {
+    switch (r) {
+    case ROT_PORTRAIT:  return "portrait";
+    case ROT_LANDSCAPE: return "landscape";
+    default:            return "manual";
+    }
 }
 
 const char *SoundItemName(int i) {
