@@ -15,7 +15,7 @@
 #define WSCAMP_VERSION_MINOR 0
 #endif
 #ifndef WSCAMP_VERSION_PATCH
-#define WSCAMP_VERSION_PATCH 0
+#define WSCAMP_VERSION_PATCH 1
 #endif
 
 #define WSCAMP_STRINGIFY_(x) #x

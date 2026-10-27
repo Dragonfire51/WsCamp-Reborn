@@ -181,6 +181,11 @@ jobs:
           set -e
           TAG="latest"
 
+          # Los paquetes quedan en dist/ junto a los directorios extraidos de
+          # cada artefacto; solo se suben los ficheros.
+          ASSETS=$(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort)
+          echo "Assets a subir:"; echo "$ASSETS"
+
           cat > notes.md <<EOF
           ## WsCampReborn ${V}
 
@@ -212,9 +217,11 @@ jobs:
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "WsCampReborn ${V}" --notes-file notes.md
-            gh release upload "$TAG" dist/* --clobber
+            # shellcheck disable=SC2086
+            gh release upload "$TAG" $ASSETS --clobber
           else
-            gh release create "$TAG" dist/* \
+            # shellcheck disable=SC2086
+            gh release create "$TAG" $ASSETS \
               --title "WsCampReborn ${V}" \
               --notes-file notes.md \
               --target "$GITHUB_SHA"
