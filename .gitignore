@@ -1,0 +1,16 @@
+# Artefactos de compilacion
+build/
+*.o
+*.exe
+
+# Nucleo libretro (binario de terceros, no se versiona)
+lib/*.dll
+*.dll
+
+# Estados guardados y registro
+saves/
+wscamp.log
+
+# Sistema
+Thumbs.db
+desktop.ini
