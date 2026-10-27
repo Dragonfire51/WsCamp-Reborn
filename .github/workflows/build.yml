@@ -64,11 +64,11 @@ jobs:
             kind: mingw
             cross: i686
           - platform: macos-x86_64
-            os: macos-13
+            os: macos-15-intel
             kind: unix
             arch: x86_64
           - platform: macos-arm64
-            os: macos-14
+            os: macos-15
             kind: unix
             arch: arm64
 
