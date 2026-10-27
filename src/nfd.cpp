@@ -43,6 +43,22 @@ std::string ShellQuote(const std::string &s) {
     return out;
 }
 
+#if defined(__APPLE__)
+// Cita una cadena para AppleScript: solo hay que escapar la barra invertida y
+// la comilla doble. No sirve ShellQuote(), porque las comillas simples
+// cerrarian el argumento que ya va entrecomillado para el shell.
+std::string AppleScriptQuote(const std::string &s) {
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '\\' || c == '"')
+            out += '\\';
+        out += c;
+    }
+    out += '"';
+    return out;
+}
+#endif
+
 // Ejecuta cmd y devuelve la primera linea de la salida estandar.
 std::string RunCapture(const std::string &cmd) {
     FILE *p = popen(cmd.c_str(), "r");
@@ -118,12 +134,15 @@ std::string OpenFileDialog(SDL_Window *parent, const std::string &start_dir) {
     return utf8;
 
 #elif defined(__APPLE__)
-    std::string script =
-        "osascript -e 'POSIX path of (choose file with prompt \"" DIALOG_TITLE "\"";
+    // Se construye el AppleScript y despues se cita entero para el shell: asi
+    // una ruta con comillas simples tampoco rompe el comando.
+    std::string script = "POSIX path of (choose file with prompt \"";
+    script += DIALOG_TITLE;
+    script += "\"";
     if (!start_dir.empty())
-        script += " default location POSIX file " + ShellQuote(start_dir);
-    script += ")' 2>/dev/null";
-    return RunCapture(script);
+        script += " default location POSIX file " + AppleScriptQuote(start_dir);
+    script += ")";
+    return RunCapture("osascript -e " + ShellQuote(script) + " 2>/dev/null");
 
 #else
     std::string dir = start_dir.empty() ? std::string(".") : start_dir;
