@@ -367,9 +367,12 @@ static bool Environment(unsigned cmd, void *data) {
         *reinterpret_cast<bool *>(data) = false;
         return true;
 
+    // El nucleo puede llamar a esta consulta con data == NULL. No es un
+    // puntero de salida obligatorio: NULL significa "¿soportas bitmasks?".
     case RETRO_ENVIRONMENT_GET_INPUT_BITMASKS:
-        *reinterpret_cast<bool *>(data) = false;
-        return true;
+        if (data != nullptr)
+            *reinterpret_cast<bool *>(data) = false;
+        return false;   // false = usa el sondeo por boton (retro_input_state)
 
     case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
         *reinterpret_cast<unsigned *>(data) = 0;   // interfaz clasica (SET_VARIABLES)
@@ -475,10 +478,36 @@ static void UpdateWindowTitle();
 static bool LoadGame(const std::string &rom_path) {
     UnloadGame();
 
+    // El nucleo declara need_fullpath = false, asi que espera los bytes de la
+    // ROM en info.data/info.size; solo con info.path no carga nada.
+    std::vector<uint8_t> rom;
+    {
+        FILE *f = fopen(rom_path.c_str(), "rb");
+        if (f == nullptr) {
+            SetStatus("No se pudo abrir la ROM: " + BaseName(rom_path));
+            return false;
+        }
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (len <= 0) {
+            fclose(f);
+            SetStatus("ROM vacia: " + BaseName(rom_path));
+            return false;
+        }
+        rom.resize((size_t)len);
+        size_t rd = fread(rom.data(), 1, rom.size(), f);
+        fclose(f);
+        if (rd != rom.size()) {
+            SetStatus("Error leyendo la ROM: " + BaseName(rom_path));
+            return false;
+        }
+    }
+
     struct retro_game_info info = {};
     info.path = rom_path.c_str();
-    info.data = nullptr;
-    info.size = 0;
+    info.data = rom.data();
+    info.size = rom.size();
     info.meta = nullptr;
 
     if (!g_core.retro_load_game(&info)) {
@@ -492,7 +521,7 @@ static bool LoadGame(const std::string &rom_path) {
     g_core.retro_get_system_av_info(&g_av);
     OpenAudio(g_av.timing.sample_rate);
 
-    if (g_av.geometry.base_width > 0 && g_av.geometry.base_height > 0) {
+    if (g_av.geometry.base_width > 0 && g_av.geometry.base_height > 0 && g_window != nullptr) {
         unsigned w = g_av.geometry.base_width;
         unsigned h = g_av.geometry.base_height;
         if (g_rotation == 90 || g_rotation == 270)
@@ -792,6 +821,8 @@ static std::vector<MenuItem> MenuItems(int menu) {
 }
 
 static void UpdateWindowTitle() {
+    if (g_window == nullptr)
+        return;
     std::string title = std::string(WSCAMP_APP_NAME) + " " + WSCAMP_VERSION_STRING;
     if (g_game_loaded)
         title += " - " + BaseName(g_rom_path);
@@ -1016,6 +1047,53 @@ static void HandleBrowserMouse(const SDL_MouseButtonEvent &m) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Autocomprobacion (--selftest): carga una ROM, guarda un estado, avanza y lo
+// vuelve a cargar. Sirve como smoke test sin interfaz.
+// ---------------------------------------------------------------------------
+static int SelfTest(const std::string &rom_path) {
+    if (!StartCore()) {
+        fprintf(stderr, "SELFTEST FALLO: no se pudo iniciar el nucleo\n");
+        return 1;
+    }
+    if (!LoadGame(rom_path)) {
+        fprintf(stderr, "SELFTEST FALLO: no se pudo cargar %s\n", rom_path.c_str());
+        StopCore();
+        return 1;
+    }
+
+    size_t sz = g_core.retro_serialize_size();
+    printf("SELFTEST: serialize_size = %zu\n", sz);
+    if (sz == 0) {
+        fprintf(stderr, "SELFTEST FALLO: el nucleo no soporta serializacion\n");
+        StopCore();
+        return 1;
+    }
+
+    for (int i = 0; i < 120; ++i)
+        g_core.retro_run();
+
+    if (!SaveState(0)) {
+        fprintf(stderr, "SELFTEST FALLO: no se pudo guardar el estado\n");
+        StopCore();
+        return 1;
+    }
+    printf("SELFTEST: estado guardado en %s\n", StatePath(0).c_str());
+
+    for (int i = 0; i < 60; ++i)
+        g_core.retro_run();
+
+    if (!LoadState(0)) {
+        fprintf(stderr, "SELFTEST FALLO: no se pudo cargar el estado\n");
+        StopCore();
+        return 1;
+    }
+
+    printf("SELFTEST: OK (version %s)\n", WSCAMP_VERSION_STRING);
+    StopCore();
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "SDL_Init fallo: %s\n", SDL_GetError());
@@ -1026,6 +1104,12 @@ int main(int argc, char *argv[]) {
     g_system_dir = g_exe_dir;
     g_save_dir   = JoinPath(g_exe_dir, "saves");
     g_assets_dir = JoinPath(g_exe_dir, "system");
+
+    if (argc > 2 && strcmp(argv[1], "--selftest") == 0) {
+        int rc = SelfTest(argv[2]);
+        SDL_Quit();
+        return rc;
+    }
 
     g_window = SDL_CreateWindow(WSCAMP_VERSION_FULL,
                                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,

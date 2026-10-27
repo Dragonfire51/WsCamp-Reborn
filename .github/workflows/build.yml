@@ -103,6 +103,29 @@ jobs:
           make VERSION=${{ needs.version.outputs.value }}
           make info || true
 
+      # Smoke test: carga el nucleo real, guarda un estado y lo recarga.
+      - name: Autocomprobacion (Linux)
+        if: matrix.platform == 'linux-x86_64'
+        run: |
+          set -e
+          curl -sL -o /tmp/core.zip \
+            https://buildbot.libretro.com/nightly/linux/x86_64/latest/mednafen_wswan_libretro.so.zip
+          python3 -c "import zipfile;zipfile.ZipFile('/tmp/core.zip').extractall('.')"
+          python3 - <<'PY'
+          import struct
+          size = 128 * 1024
+          rom = bytearray(size)
+          rom[0:10] = b'WonderSwan'
+          rom[0x1E] = 0x01
+          rom[0x1F] = 0x00
+          rom[0x00:0x05] = bytes([0xEA, 0x00, 0x01, 0x00, 0x00])
+          for i in range(0x100, size):
+              rom[i] = 0x90
+          open('/tmp/smoke.ws', 'wb').write(rom)
+          PY
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+            ./WsCampReborn --selftest /tmp/smoke.ws
+
       - name: Empaquetar
         run: |
           set -e
