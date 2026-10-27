@@ -1,0 +1,198 @@
+name: build
+
+# Compila para Linux x64, Windows x86, Windows x64, macOS x64 y macOS arm64, y
+# publica los binarios en el release "latest".
+#
+# La version sale de src/version.h; para cambiarla, edita ese fichero (o lanza
+# el workflow con el input "version").
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version a compilar (ej. 1.0.1). Vacio = la de version.h'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.detect.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        name: Detectar version
+        run: |
+          # 1) input manual  2) tag vX.Y.Z  3) version.h
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            V="${GITHUB_REF#refs/tags/v}"
+          else
+            MAJ=$(grep -oP 'WSCAMP_VERSION_MAJOR\s+\K[0-9]+' src/version.h | head -1)
+            MIN=$(grep -oP 'WSCAMP_VERSION_MINOR\s+\K[0-9]+' src/version.h | head -1)
+            PAT=$(grep -oP 'WSCAMP_VERSION_PATCH\s+\K[0-9]+' src/version.h | head -1)
+            V="${MAJ:-1}.${MIN:-0}.${PAT:-0}"
+          fi
+          echo "Version detectada: $V"
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    name: build-${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+            kind: unix
+          - platform: windows-x86_64
+            os: ubuntu-latest
+            kind: mingw
+            cross: x86_64
+          - platform: windows-i686
+            os: ubuntu-latest
+            kind: mingw
+            cross: i686
+          - platform: macos-x86_64
+            os: macos-13
+            kind: unix
+            arch: x86_64
+          - platform: macos-arm64
+            os: macos-14
+            kind: unix
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Linux nativo ---
+      - name: Dependencias (Linux)
+        if: matrix.kind == 'unix' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+
+      # --- macOS nativo ---
+      - name: Dependencias (macOS)
+        if: matrix.kind == 'unix' && runner.os == 'macOS'
+        run: brew install sdl2
+
+      # --- Windows cruzado desde Linux ---
+      - name: Dependencias (MinGW)
+        if: matrix.kind == 'mingw'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-x86-64 g++-mingw-w64-i686 zip
+          curl -sL -o /tmp/sdl2.tar.gz \
+            https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz
+          sudo mkdir -p /opt/sdl2-mingw
+          sudo tar xzf /tmp/sdl2.tar.gz -C /opt/sdl2-mingw --strip-components=1
+
+      - name: Compilar
+        env:
+          CROSS: ${{ matrix.cross }}
+        run: |
+          make VERSION=${{ needs.version.outputs.value }}
+          make info || true
+
+      - name: Empaquetar
+        run: |
+          set -e
+          V="${{ needs.version.outputs.value }}"
+          P="${{ matrix.platform }}"
+          OUT="WsCampReborn-${V}-${P}"
+          mkdir -p "dist/${OUT}"
+          if [ "${{ matrix.kind }}" = "mingw" ]; then
+            cp WsCampReborn.exe "dist/${OUT}/"
+            # SDL2.dll junto al ejecutable
+            cp "/opt/sdl2-mingw/${{ matrix.cross }}-w64-mingw32/bin/SDL2.dll" "dist/${OUT}/"
+          else
+            cp WsCampReborn "dist/${OUT}/"
+          fi
+          cp README.md "dist/${OUT}/"
+          cp lib/README.txt "dist/${OUT}/lib-README.txt"
+          cd dist
+          if [ "${{ matrix.kind }}" = "mingw" ]; then
+            zip -r "${OUT}.zip" "${OUT}"
+          else
+            tar czf "${OUT}.tar.gz" "${OUT}"
+          fi
+          ls -la
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [ version, build ]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descargar artefactos
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Listar
+        run: ls -la dist
+
+      - name: Publicar release "latest"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ needs.version.outputs.value }}
+        run: |
+          set -e
+          TAG="latest"
+
+          cat > notes.md <<EOF
+          ## WsCampReborn ${V}
+
+          Binarios del emulador WonderSwan / WonderSwan Color (nucleo beetle-wswan).
+
+          | Plataforma | Fichero |
+          |------------|---------|
+          | Linux x86_64   | WsCampReborn-${V}-linux-x86_64.tar.gz |
+          | Windows x86_64 | WsCampReborn-${V}-windows-x86_64.zip |
+          | Windows i686   | WsCampReborn-${V}-windows-i686.zip |
+          | macOS x86_64   | WsCampReborn-${V}-macos-x86_64.tar.gz |
+          | macOS arm64    | WsCampReborn-${V}-macos-arm64.tar.gz |
+
+          Version compilada desde \`src/version.h\` (commit ${GITHUB_SHA}).
+
+          ### Antes de ejecutar
+          Copia el nucleo libretro junto al ejecutable o en \`lib/\`:
+
+          - Linux:   \`mednafen_wswan_libretro.so\`
+          - Windows: \`mednafen_wswan_libretro.dll\`
+          - macOS:   \`mednafen_wswan_libretro.dylib\`
+
+          Descargalo como build \`beetle-wswan-libretro\`.
+          EOF
+
+          # Crea o mueve el tag "latest" al commit actual.
+          git tag -f latest
+          git push -f origin latest
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "WsCampReborn ${V}" --notes-file notes.md
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "WsCampReborn ${V}" \
+              --notes-file notes.md \
+              --target "$GITHUB_SHA"
+          fi

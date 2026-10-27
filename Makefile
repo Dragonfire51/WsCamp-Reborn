@@ -1,38 +1,82 @@
-# WsCampReborn -- Makefile para MinGW-w64
+# WsCampReborn -- Makefile multiplataforma (Linux, macOS, Windows x86/x64)
 #
-# IMPORTANTE: cada linea de receta debe empezar con un TABULADOR real (\t),
-# nunca con espacios. Si make dice "missing separator", es que el editor ha
-# convertido los tabuladores en espacios.
+# IMPORTANTE: cada linea de receta empieza con un TABULADOR real, nunca con
+# espacios. Si make dice "missing separator", el editor ha convertido los tabs.
 #
 # Uso:
-#   mingw32-make            -> compila WsCampReborn.exe
-#   mingw32-make clean      -> borra build/ y el ejecutable
+#   make                     -> compila para la plataforma actual
+#   make CROSS=x86_64        -> Windows 64 bits (MinGW-w64)
+#   make CROSS=i686          -> Windows 32 bits (MinGW-w64)
+#   make VERSION=1.2.3       -> sobreescribe la version del binario
+#   make clean
 #
-# Se enlazan estaticamente libstdc++ y libgcc para que el .exe no dependa de
-# libstdc++-6.dll / libgcc_s_seh-1.dll. Esto evita el clasico error
-# "undefined reference to ...basic_string<wchar_t>..._M_replace_cold".
+# Requiere SDL2 (dev). La version se define en src/version.h; VERSION la
+# sobreescribe sin tocar el codigo.
 
-CXX      := g++
-CXXFLAGS := -std=c++17 -O2 -municode -DUNICODE -D_UNICODE -Wall -Wextra -Isrc
-LDFLAGS  := -mwindows -municode -static-libgcc -static-libstdc++ \
-            -lcomdlg32 -lwinmm -lgdi32 -luser32
+TARGET_NAME := WsCampReborn
+SRCDIR      := src
+OBJDIR      := build
 
-TARGET   := WsCampReborn.exe
-SRCDIR   := src
-OBJDIR   := build
+# --- Version -----------------------------------------------------------------
+# Si se pasa VERSION=1.2.3 se divide en mayor/menor/parche.
+VERSION ?= 1.0.0
+VMAJ := $(word 1,$(subst ., ,$(VERSION)))
+VMIN := $(word 2,$(subst ., ,$(VERSION)))
+VPAT := $(word 3,$(subst ., ,$(VERSION)))
+VFLAGS := -DWSCAMP_VERSION_MAJOR=$(VMAJ) -DWSCAMP_VERSION_MINOR=$(VMIN) \
+          -DWSCAMP_VERSION_PATCH=$(if $(VPAT),$(VPAT),0)
 
-SRCS     := $(wildcard $(SRCDIR)/*.cpp)
-OBJS     := $(patsubst $(SRCDIR)/%.cpp,$(OBJDIR)/%.o,$(SRCS))
+# --- Toolchain ---------------------------------------------------------------
+CXXFLAGS_COMMON := -std=c++17 -O2 -Wall -Wextra -Isrc $(VFLAGS)
 
-.PHONY: all clean
+ifeq ($(CROSS),x86_64)
+  CXX      := x86_64-w64-mingw32-g++
+  SDL_ROOT := /opt/sdl2-mingw/x86_64-w64-mingw32
+  PLATFORM := windows-x86_64
+  EXT      := .exe
+  PLATFLAGS := -municode -DUNICODE -D_UNICODE -I$(SDL_ROOT)/include/SDL2
+  LDLIBS   := -L$(SDL_ROOT)/lib -lmingw32 -lSDL2main -lSDL2 -mwindows \
+              -static-libgcc -static-libstdc++
+else ifeq ($(CROSS),i686)
+  CXX      := i686-w64-mingw32-g++
+  SDL_ROOT := /opt/sdl2-mingw/i686-w64-mingw32
+  PLATFORM := windows-i686
+  EXT      := .exe
+  PLATFLAGS := -municode -DUNICODE -D_UNICODE -I$(SDL_ROOT)/include/SDL2
+  LDLIBS   := -L$(SDL_ROOT)/lib -lmingw32 -lSDL2main -lSDL2 -mwindows \
+              -static-libgcc -static-libstdc++
+else
+  CXX      := c++
+  EXT      :=
+  PLATFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
+  LDLIBS    := $(shell pkg-config --libs sdl2 2>/dev/null)
+  UNAME_S  := $(shell uname -s)
+  ifeq ($(UNAME_S),Darwin)
+    PLATFORM := macos-$(shell uname -m)
+  else
+    PLATFORM := linux-$(shell uname -m)
+  endif
+endif
+
+TARGET := $(TARGET_NAME)$(EXT)
+SRCS   := $(wildcard $(SRCDIR)/*.cpp)
+OBJS   := $(patsubst $(SRCDIR)/%.cpp,$(OBJDIR)/%.o,$(SRCS))
+
+.PHONY: all clean info
 
 all: $(TARGET)
 
+info:
+	@echo "PLATAFORMA: $(PLATFORM)"
+	@echo "COMPILADOR: $(CXX)"
+	@echo "VERSION   : $(VERSION)"
+	@echo "SALIDA    : $(TARGET)"
+
 $(TARGET): $(OBJS)
-	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
+	$(CXX) $(OBJS) -o $@ $(LDLIBS)
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS_COMMON) $(PLATFLAGS) -c $< -o $@
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)

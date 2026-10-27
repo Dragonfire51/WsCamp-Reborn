@@ -1,40 +1,32 @@
-// ws_core.cpp -- Implementacion del cargador dinamico del nucleo libretro.
+// ws_core.cpp -- Cargador dinamico portable del nucleo libretro.
 #include "ws_core.h"
 
-namespace {
+#include <SDL.h>
 
-// Solo se usan nombres de simbolos ASCII, asi que una conversion directa basta.
-std::wstring Widen(const char *s) {
-    std::wstring w;
-    for (; *s != '\0'; ++s)
-        w.push_back(static_cast<wchar_t>(static_cast<unsigned char>(*s)));
-    return w;
-}
-
-} // namespace
-
-bool WsCore::Load(const std::wstring &dll_path) {
+bool WsCore::Load(const std::string &library_path) {
     Unload();
     last_error_.clear();
 
-    module_ = ::LoadLibraryW(dll_path.c_str());
-    if (module_ == nullptr) {
-        last_error_ = L"No se pudo cargar la DLL: " + dll_path;
+    handle_ = SDL_LoadObject(library_path.c_str());
+    if (handle_ == nullptr) {
+        last_error_ = std::string("No se pudo cargar la biblioteca: ") +
+                      library_path + " (" + SDL_GetError() + ")";
         return false;
     }
 
-    // GetProcAddress devuelve FARPROC; convertir a un puntero de funcion
-    // tipado siempre dispara -Wcast-function-type, pero es el patron estandar
-    // de carga dinamica, asi que se silencia solo aqui.
+    // SDL_LoadFunction devuelve un puntero sin tipo; convertirlo a un puntero
+    // de funcion tipado siempre dispara -Wcast-function-type, pero es el patron
+    // estandar de carga dinamica.
+#if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
 
-    // Resuelve un simbolo y aborta con un mensaje claro si no existe.
 #define WS_BIND(fn)                                                        \
     do {                                                                   \
-        FARPROC proc = ::GetProcAddress(module_, #fn);                     \
+        void *proc = SDL_LoadFunction(handle_, #fn);                       \
         if (proc == nullptr) {                                             \
-            last_error_ = L"Simbolo no exportado: " + Widen(#fn);          \
+            last_error_ = std::string("Simbolo no exportado: ") + #fn;     \
             Unload();                                                      \
             return false;                                                  \
         }                                                                  \
@@ -66,15 +58,17 @@ bool WsCore::Load(const std::wstring &dll_path) {
 
 #undef WS_BIND
 
+#if defined(__GNUC__)
 #pragma GCC diagnostic pop
+#endif
 
     return true;
 }
 
 void WsCore::Unload() {
-    if (module_ != nullptr) {
-        ::FreeLibrary(module_);
-        module_ = nullptr;
+    if (handle_ != nullptr) {
+        SDL_UnloadObject(handle_);
+        handle_ = nullptr;
     }
 
     retro_init                       = nullptr;

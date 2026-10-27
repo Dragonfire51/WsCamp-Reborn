@@ -1,13 +1,10 @@
-// ws_core.h -- Declaraciones y cargador dinamico del nucleo libretro
-// (beetle-wswan / mednafen_wswan_libretro.dll)
+// ws_core.h -- ABI minima de libretro y cargador dinamico portable del nucleo.
 //
-// IMPORTANTE: aqui NO se usa __declspec(dllimport) ni ninguna biblioteca de
-// importacion. Todas las funciones del nucleo se resuelven en tiempo de
-// ejecucion con GetProcAddress, por lo que el enlazador solo necesita las
-// librerias de Windows (user32, gdi32, comdlg32, winmm).
+// La carga usa SDL_LoadObject/SDL_LoadFunction, que envuelve dlopen en
+// Linux/macOS y LoadLibrary en Windows. No se enlaza ninguna libreria de
+// importacion: todos los simbolos se resuelven en tiempo de ejecucion.
 #pragma once
 
-#include <windows.h>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
@@ -74,8 +71,8 @@ typedef size_t  (*retro_audio_sample_batch_t)(const int16_t *data, size_t frames
 typedef void    (*retro_input_poll_t)(void);
 typedef int16_t (*retro_input_state_t)(unsigned port, unsigned device, unsigned index, unsigned id);
 
-// Los comandos de entorno pueden llegar con el bit EXPERIMENTAL (0x10000)
-// activado; hay que enmascarar con 0xFFFF antes de comparar.
+// Los comandos pueden llegar con el bit EXPERIMENTAL (0x10000) activado;
+// hay que enmascarar con 0xFFFF antes de comparar.
 #define RETRO_ENVIRONMENT_EXPERIMENTAL 0x10000u
 
 enum {
@@ -171,13 +168,15 @@ enum {
 // ---------------------------------------------------------------------------
 class WsCore {
 public:
-    // Carga la DLL y resuelve todos los simbolos. Si falta alguno, devuelve
-    // false y deja su nombre en last_error().
-    bool Load(const std::wstring &dll_path);
-    void Unload();
-    bool IsLoaded() const { return module_ != nullptr; }
+    ~WsCore() { Unload(); }
 
-    const std::wstring &last_error() const { return last_error_; }
+    // Carga la biblioteca y resuelve todos los simbolos. Si falta alguno,
+    // devuelve false y deja su nombre en last_error().
+    bool Load(const std::string &library_path);
+    void Unload();
+    bool IsLoaded() const { return handle_ != nullptr; }
+
+    const std::string &last_error() const { return last_error_; }
 
     // --- funciones del nucleo ---
     void     (*retro_init)(void)                                        = nullptr;
@@ -205,6 +204,6 @@ public:
     void (*retro_set_input_state)(retro_input_state_t)                  = nullptr;
 
 private:
-    HMODULE      module_ = nullptr;
-    std::wstring last_error_;
+    void       *handle_ = nullptr;
+    std::string last_error_;
 };

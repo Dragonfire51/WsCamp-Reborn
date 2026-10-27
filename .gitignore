@@ -5,7 +5,11 @@ build/
 
 # Nucleo libretro (binario de terceros, no se versiona)
 lib/*.dll
+lib/*.so
+lib/*.dylib
 *.dll
+*.so
+*.dylib
 
 # Estados guardados y registro
 saves/
