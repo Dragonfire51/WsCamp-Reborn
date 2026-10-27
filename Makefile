@@ -8,6 +8,8 @@
 #   make CROSS=x86_64        -> Windows 64 bits (MinGW-w64)
 #   make CROSS=i686          -> Windows 32 bits (MinGW-w64)
 #   make VERSION=1.2.3       -> sobreescribe la version del binario
+#   make core                -> compila el nucleo (con control por canal) en lib/
+#   make test                -> ejecuta las pruebas de video y la autocomprobacion
 #   make clean
 #
 # Requiere SDL2 (dev). La version se define en src/version.h; VERSION la
@@ -67,7 +69,7 @@ TARGET := $(TARGET_NAME)$(EXT)
 SRCS   := $(wildcard $(SRCDIR)/*.cpp)
 OBJS   := $(patsubst $(SRCDIR)/%.cpp,$(OBJDIR)/%.o,$(SRCS))
 
-.PHONY: all clean info
+.PHONY: all clean info core test
 
 all: $(TARGET)
 
@@ -85,6 +87,34 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.cpp | $(OBJDIR)
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
+
+# Compila el nucleo beetle-wswan con el control por canal de sonido aplicado
+# y lo deja en lib/. La plataforma de destino se pasa como argumento.
+core:
+	sh tools/build_core.sh $(CORE_PLATFORM)
+
+# Pruebas: conversion/rotacion de video y autocomprobacion con el nucleo
+# real. Requiere el nucleo en lib/ (make core) y una ROM en ROM=<ruta>.
+test: $(TARGET)
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Isrc $(PLATFLAGS) \
+		tests/video_test.cpp $(SRCDIR)/video.cpp -o $(OBJDIR)/video_test $(LDLIBS)
+	$(OBJDIR)/video_test
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Isrc $(PLATFLAGS) \
+		tests/sound_test.cpp $(SRCDIR)/ws_core.cpp -o $(OBJDIR)/sound_test $(LDLIBS)
+	@CORE=$$(ls lib/mednafen_wswan_libretro.* 2>/dev/null | head -1); \
+	if [ -z "$$CORE" ]; then \
+		echo "test: sin nucleo en lib/, se omite sound_test"; \
+	elif [ -n "$(ROM)" ]; then \
+		$(OBJDIR)/sound_test "$$CORE" "$(ROM)"; \
+	else \
+		echo "test: sin ROM=<ruta>, se omite sound_test"; \
+	fi
+	@if [ -n "$(ROM)" ]; then \
+		SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+		./$(TARGET) --selftest "$(ROM)"; \
+	else \
+		echo "test: sin ROM=<ruta>, se omite la autocomprobacion"; \
+	fi
 
 clean:
 	rm -rf $(OBJDIR) $(TARGET)

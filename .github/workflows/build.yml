@@ -55,22 +55,27 @@ jobs:
           - platform: linux-x86_64
             os: ubuntu-latest
             kind: unix
+            core: linux-x86_64
           - platform: windows-x86_64
             os: ubuntu-latest
             kind: mingw
             cross: x86_64
+            core: windows-x86_64
           - platform: windows-i686
             os: ubuntu-latest
             kind: mingw
             cross: i686
+            core: windows-i686
           - platform: macos-x86_64
             os: macos-15-intel
             kind: unix
             arch: x86_64
+            core: macos-x86_64
           - platform: macos-arm64
             os: macos-15
             kind: unix
             arch: arm64
+            core: macos-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -96,6 +101,11 @@ jobs:
           sudo mkdir -p /opt/sdl2-mingw
           sudo tar xzf /tmp/sdl2.tar.gz -C /opt/sdl2-mingw --strip-components=1
 
+      # El nucleo se compila desde fuente para incluir el control por canal de
+      # sonido que ofrece el menu de Opciones.
+      - name: Compilar nucleo (beetle-wswan)
+        run: sh tools/build_core.sh ${{ matrix.core }}
+
       - name: Compilar
         env:
           CROSS: ${{ matrix.cross }}
@@ -108,9 +118,6 @@ jobs:
         if: matrix.platform == 'linux-x86_64'
         run: |
           set -e
-          curl -sL -o /tmp/core.zip \
-            https://buildbot.libretro.com/nightly/linux/x86_64/latest/mednafen_wswan_libretro.so.zip
-          python3 -c "import zipfile;zipfile.ZipFile('/tmp/core.zip').extractall('.')"
           python3 - <<'PY'
           import struct
           size = 128 * 1024
@@ -123,8 +130,9 @@ jobs:
               rom[i] = 0x90
           open('/tmp/smoke.ws', 'wb').write(rom)
           PY
+          # Pruebas de video, de control por canal y autocomprobacion.
           SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
-            ./WsCampReborn --selftest /tmp/smoke.ws
+            make test ROM=/tmp/smoke.ws
 
       - name: Empaquetar
         run: |
@@ -137,8 +145,14 @@ jobs:
             cp WsCampReborn.exe "dist/${OUT}/"
             # SDL2.dll junto al ejecutable
             cp "/opt/sdl2-mingw/${{ matrix.cross }}-w64-mingw32/bin/SDL2.dll" "dist/${OUT}/"
+            cp lib/mednafen_wswan_libretro.dll "dist/${OUT}/"
           else
             cp WsCampReborn "dist/${OUT}/"
+            if [ "${{ runner.os }}" = "macOS" ]; then
+              cp lib/mednafen_wswan_libretro.dylib "dist/${OUT}/"
+            else
+              cp lib/mednafen_wswan_libretro.so "dist/${OUT}/"
+            fi
           fi
           cp README.md "dist/${OUT}/"
           cp lib/README.txt "dist/${OUT}/lib-README.txt"

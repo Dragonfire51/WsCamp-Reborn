@@ -1,7 +1,8 @@
 // main.cpp -- WsCampReborn: frontend libretro portable (SDL2).
 //
 // Carga el nucleo beetle-wswan (mednafen_wswan_libretro) en tiempo de ejecucion
-// y ofrece 10 ranuras de Save/Load State. Compila en Linux, macOS y Windows.
+// y ofrece 10 ranuras de Save/Load State, menu de Opciones (video, sonido y
+// controles) y guardado de la configuracion en WsCampReborn.ini.
 //
 // Compilar con: make        (ver Makefile)
 
@@ -12,15 +13,19 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
 #include <system_error>
 #include <vector>
 
+#include "config.h"
 #include "font5x7.h"
 #include "menu.h"
+#include "nfd.h"
 #include "version.h"
+#include "video.h"
 #include "ws_core.h"
 
 // ---------------------------------------------------------------------------
@@ -57,9 +62,15 @@ static bool              g_audio_on  = false;
 
 // Interfaz
 static std::string       g_exe_dir;
-static int               g_menu_open = -1;       // indice de menu abierto o -1
+static int               g_menu_open  = -1;      // indice de menu abierto o -1
+static int               g_submenu     = SUB_NONE;
+static int               g_menu_sel    = 0;      // entrada con el foco en el menu
+static int               g_submenu_sel = 0;      // entrada con el foco en el submenu
 static std::string       g_status;               // mensaje temporal
 static Uint32            g_status_until = 0;
+
+// Mapeo de teclas
+static int               g_capture_button = -1;  // boton que espera una tecla
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -83,6 +94,13 @@ static std::string JoinPath(const std::string &dir, const std::string &name) {
     if (last == '/' || last == '\\')
         return dir + name;
     return dir + "/" + name;
+}
+
+static std::string DirName(const std::string &path) {
+    size_t p = path.find_last_of("/\\");
+    if (p == std::string::npos)
+        return std::string();
+    return path.substr(0, p);
 }
 
 static bool FileExists(const std::string &path) {
@@ -132,6 +150,10 @@ static const FontGlyph *FindGlyph(char c) {
 
 static int TextHeight(int scale) { return FONT_GLYPH_H * scale; }
 
+static int TextWidth(const std::string &text, int scale) {
+    return (int)text.size() * FONT_ADVANCE * scale;
+}
+
 static void DrawText(SDL_Renderer *r, int x, int y, const std::string &text,
                      int scale, SDL_Color color) {
     SDL_SetRenderDrawColor(r, color.r, color.g, color.b, color.a);
@@ -160,7 +182,7 @@ static void FillRect(SDL_Renderer *r, int x, int y, int w, int h, SDL_Color c) {
 }
 
 // ---------------------------------------------------------------------------
-// Audio (SDL_AudioStream con conversion automatica)
+// Audio (SDL_QueueAudio)
 // ---------------------------------------------------------------------------
 static void CloseAudio() {
     if (g_audio_dev != 0) {
@@ -168,6 +190,13 @@ static void CloseAudio() {
         g_audio_dev = 0;
     }
     g_audio_on = false;
+}
+
+// El silencio general se aplica pausando el dispositivo: asi el corte es
+// inmediato y no depende de lo que quede en la cola.
+static void ApplyMasterMute() {
+    if (g_audio_dev != 0)
+        SDL_PauseAudioDevice(g_audio_dev, g_cfg.master ? 0 : 1);
 }
 
 static void OpenAudio(double sample_rate) {
@@ -189,12 +218,12 @@ static void OpenAudio(double sample_rate) {
         return;
     }
 
-    SDL_PauseAudioDevice(g_audio_dev, 0);
     g_audio_on = true;
+    ApplyMasterMute();
 }
 
 static void PushAudio(const int16_t *data, size_t frames) {
-    if (!g_audio_on || data == nullptr || frames == 0)
+    if (!g_audio_on || !g_cfg.master || data == nullptr || frames == 0)
         return;
     // Si el buffer del dispositivo se llena, SDL descarta el exceso; es
     // preferible a bloquear el hilo de emulacion.
@@ -209,65 +238,8 @@ static void VideoRefresh(const void *data, unsigned width, unsigned height, size
         // El nucleo reutiliza el frame anterior (dupe).
         return;
     }
-
-    if (g_rotation == 90 || g_rotation == 270) {
-        g_display_w = height;
-        g_display_h = width;
-    } else {
-        g_display_w = width;
-        g_display_h = height;
-    }
-    g_display.resize((size_t)g_display_w * g_display_h);
-
-    const uint8_t *base = reinterpret_cast<const uint8_t *>(data);
-
-    for (unsigned y = 0; y < height; ++y) {
-        for (unsigned x = 0; x < width; ++x) {
-            uint32_t px;
-            switch (g_pixel_format) {
-            case RETRO_PIXEL_FORMAT_XRGB8888: {
-                const uint32_t *row = reinterpret_cast<const uint32_t *>(base + y * pitch);
-                px = 0xFF000000u | (row[x] & 0x00FFFFFFu);
-                break;
-            }
-            case RETRO_PIXEL_FORMAT_RGB565: {
-                const uint16_t *row = reinterpret_cast<const uint16_t *>(base + y * pitch);
-                uint16_t p = row[x];
-                unsigned r5 = (p >> 11) & 0x1F;
-                unsigned g6 = (p >> 5)  & 0x3F;
-                unsigned b5 =  p        & 0x1F;
-                unsigned r8 = (r5 << 3) | (r5 >> 2);
-                unsigned g8 = (g6 << 2) | (g6 >> 4);
-                unsigned b8 = (b5 << 3) | (b5 >> 2);
-                px = 0xFF000000u | (r8 << 16) | (g8 << 8) | b8;
-                break;
-            }
-            case RETRO_PIXEL_FORMAT_0RGB1555:
-            default: {
-                const uint16_t *row = reinterpret_cast<const uint16_t *>(base + y * pitch);
-                uint16_t p = row[x];
-                unsigned r5 = (p >> 10) & 0x1F;
-                unsigned g5 = (p >> 5)  & 0x1F;
-                unsigned b5 =  p        & 0x1F;
-                unsigned r8 = (r5 << 3) | (r5 >> 2);
-                unsigned g8 = (g5 << 3) | (g5 >> 2);
-                unsigned b8 = (b5 << 3) | (b5 >> 2);
-                px = 0xFF000000u | (r8 << 16) | (g8 << 8) | b8;
-                break;
-            }
-            }
-
-            unsigned dx, dy;
-            switch (g_rotation) {
-            case 90:  dx = height - 1 - y; dy = x;              break;
-            case 180: dx = width - 1 - x;  dy = height - 1 - y; break;
-            case 270: dx = y;              dy = width - 1 - x;  break;
-            default:  dx = x;              dy = y;              break;
-            }
-            g_display[(size_t)dy * g_display_w + dx] = px;
-        }
-    }
-
+    ConvertFrame(data, width, height, pitch, g_pixel_format, g_rotation,
+                 g_display, g_display_w, g_display_h);
     g_have_frame = true;
 }
 
@@ -293,21 +265,29 @@ static int16_t InputState(unsigned port, unsigned device, unsigned index, unsign
     if (keys == nullptr)
         return 0;
 
-    switch (id) {
-    case RETRO_DEVICE_ID_JOYPAD_A:      return keys[SDL_SCANCODE_X]      ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_B:      return keys[SDL_SCANCODE_Z]      ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_Y:      return keys[SDL_SCANCODE_S]      ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_X:      return keys[SDL_SCANCODE_A]      ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_L:      return keys[SDL_SCANCODE_Q]      ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_R:      return keys[SDL_SCANCODE_W]      ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_START:  return keys[SDL_SCANCODE_RETURN] ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_SELECT: return keys[SDL_SCANCODE_BACKSPACE] ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_UP:     return keys[SDL_SCANCODE_UP]     ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_DOWN:   return keys[SDL_SCANCODE_DOWN]   ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_LEFT:   return keys[SDL_SCANCODE_LEFT]   ? 1 : 0;
-    case RETRO_DEVICE_ID_JOYPAD_RIGHT:  return keys[SDL_SCANCODE_RIGHT]  ? 1 : 0;
-    default: return 0;
+    for (int b = 0; b < WSB_COUNT; ++b) {
+        if (WsButtonRetroId(b) == id) {
+            SDL_Scancode sc = g_cfg.bind[b];
+            if (sc != SDL_SCANCODE_UNKNOWN && keys[sc])
+                return 1;
+            return 0;
+        }
     }
+    return 0;
+}
+
+// Valores de las opciones que el nucleo pide con GET_VARIABLE. Las claves de
+// sonido solo existen si se usa el nucleo parcheado que las define; con el
+// nucleo original simplemente no se consultan.
+static const char *OptionValue(const char *key) {
+    if (strcmp(key, "wswan_sound_ch1") == 0)   return g_cfg.sound[SND_CH1]   ? "enabled" : "disabled";
+    if (strcmp(key, "wswan_sound_ch2") == 0)   return g_cfg.sound[SND_CH2]   ? "enabled" : "disabled";
+    if (strcmp(key, "wswan_sound_ch3") == 0)   return g_cfg.sound[SND_CH3]   ? "enabled" : "disabled";
+    if (strcmp(key, "wswan_sound_ch4") == 0)   return g_cfg.sound[SND_CH4]   ? "enabled" : "disabled";
+    if (strcmp(key, "wswan_sound_noise") == 0) return g_cfg.sound[SND_NOISE] ? "enabled" : "disabled";
+    if (strcmp(key, "wswan_sound_pcm") == 0)   return g_cfg.sound[SND_PCM]   ? "enabled" : "disabled";
+    if (strcmp(key, "wswan_sound_dma") == 0)   return g_cfg.sound[SND_DMA]   ? "enabled" : "disabled";
+    return nullptr;
 }
 
 static bool Environment(unsigned cmd, void *data) {
@@ -350,8 +330,16 @@ static bool Environment(unsigned cmd, void *data) {
         reinterpret_cast<struct retro_log_callback *>(data)->log = LogPrintf;
         return true;
 
-    case RETRO_ENVIRONMENT_GET_VARIABLE:
-        return false;   // el nucleo usara sus valores por defecto
+    case RETRO_ENVIRONMENT_GET_VARIABLE: {
+        struct retro_variable *var = reinterpret_cast<struct retro_variable *>(data);
+        if (var == nullptr || var->key == nullptr)
+            return false;
+        const char *value = OptionValue(var->key);
+        if (value == nullptr)
+            return false;   // el nucleo usara su valor por defecto
+        var->value = value;
+        return true;
+    }
 
     case RETRO_ENVIRONMENT_SET_VARIABLES:
     case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
@@ -363,12 +351,16 @@ static bool Environment(unsigned cmd, void *data) {
     case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
         return true;
 
-    case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
-        *reinterpret_cast<bool *>(data) = false;
+    case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: {
+        // El nucleo relee las opciones cuando ve "true". Los valores se
+        // sirven desde g_cfg, asi que basta con avisar una vez.
+        *reinterpret_cast<bool *>(data) = g_options_dirty;
+        g_options_dirty = false;
         return true;
+    }
 
     // El nucleo puede llamar a esta consulta con data == NULL. No es un
-    // puntero de salida obligatorio: NULL significa "¿soportas bitmasks?".
+    // puntero de salida obligatorio: NULL significa "soportas bitmasks?".
     case RETRO_ENVIRONMENT_GET_INPUT_BITMASKS:
         if (data != nullptr)
             *reinterpret_cast<bool *>(data) = false;
@@ -474,34 +466,34 @@ static void UnloadGame() {
 }
 
 static void UpdateWindowTitle();
+static void ApplyWindowSize();
 
 static bool LoadGame(const std::string &rom_path) {
     UnloadGame();
 
-    // El nucleo declara need_fullpath = false, asi que espera los bytes de la
-    // ROM en info.data/info.size; solo con info.path no carga nada.
-    std::vector<uint8_t> rom;
-    {
-        FILE *f = fopen(rom_path.c_str(), "rb");
-        if (f == nullptr) {
-            SetStatus("No se pudo abrir la ROM: " + BaseName(rom_path));
-            return false;
-        }
-        fseek(f, 0, SEEK_END);
-        long len = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        if (len <= 0) {
-            fclose(f);
-            SetStatus("ROM vacia: " + BaseName(rom_path));
-            return false;
-        }
-        rom.resize((size_t)len);
-        size_t rd = fread(rom.data(), 1, rom.size(), f);
+    FILE *f = fopen(rom_path.c_str(), "rb");
+    if (f == nullptr) {
+        SetStatus("No se pudo abrir la ROM: " + BaseName(rom_path));
+        return false;
+    }
+
+    // beetle-wswan declara need_fullpath = false, asi que espera los bytes de
+    // la ROM en info.data; hay que mantener el buffer vivo durante la partida.
+    static std::vector<uint8_t> rom;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0) {
         fclose(f);
-        if (rd != rom.size()) {
-            SetStatus("Error leyendo la ROM: " + BaseName(rom_path));
-            return false;
-        }
+        SetStatus("La ROM esta vacia: " + BaseName(rom_path));
+        return false;
+    }
+    rom.resize((size_t)len);
+    size_t rd = fread(rom.data(), 1, rom.size(), f);
+    fclose(f);
+    if (rd != rom.size()) {
+        SetStatus("No se pudo leer la ROM: " + BaseName(rom_path));
+        return false;
     }
 
     struct retro_game_info info = {};
@@ -515,27 +507,20 @@ static bool LoadGame(const std::string &rom_path) {
         return false;
     }
 
+    g_rom_path    = rom_path;
     g_game_loaded = true;
-    g_rom_path = rom_path;
+    g_paused      = false;
 
     g_core.retro_get_system_av_info(&g_av);
     OpenAudio(g_av.timing.sample_rate);
-
-    if (g_av.geometry.base_width > 0 && g_av.geometry.base_height > 0 && g_window != nullptr) {
-        unsigned w = g_av.geometry.base_width;
-        unsigned h = g_av.geometry.base_height;
-        if (g_rotation == 90 || g_rotation == 270)
-            std::swap(w, h);
-        SDL_SetWindowSize(g_window, (int)w * 2, (int)h * 2 + MENUBAR_H);
-    }
-
+    ApplyWindowSize();
     UpdateWindowTitle();
     SetStatus("ROM cargada: " + BaseName(rom_path));
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// Explorador de archivos (simple, basado en SDL_EnumerateDirectory)
+// Explorador de archivos integrado (respaldo del dialogo nativo)
 // ---------------------------------------------------------------------------
 struct FileEntry {
     std::string name;
@@ -616,15 +601,23 @@ static void BrowseActivate() {
     }
 }
 
-static void OpenRomBrowser() {
-    g_browse_dir = g_rom_path.empty() ? g_exe_dir : g_rom_path;
-    size_t p = g_browse_dir.find_last_of("/\\");
-    if (p != std::string::npos)
-        g_browse_dir = g_browse_dir.substr(0, p);
+// Devuelve el directorio de partida del explorador.
+static std::string BrowseStartDir() {
+    if (!g_rom_path.empty()) {
+        std::string dir = DirName(g_rom_path);
+        if (!dir.empty())
+            return dir;
+    }
+    return g_exe_dir;
+}
+
+static void OpenBuiltinBrowser() {
+    g_browse_dir = BrowseStartDir();
     g_browse_sel = 0;
     BrowseRefresh();
     g_browsing = true;
     g_menu_open = -1;
+    g_submenu   = SUB_NONE;
 }
 
 // ---------------------------------------------------------------------------
@@ -779,42 +772,127 @@ static void StopCore() {
 // ---------------------------------------------------------------------------
 // Interfaz: barra de menus
 // ---------------------------------------------------------------------------
-static const char *MENU_TITLES[MENU_COUNT] = { "Archivo", "Emulacion", "Estado", "Ayuda" };
+static const char *MENU_TITLES[MENU_COUNT] = {
+    "Archivo", "Emulacion", "Estado", "Opciones", "Ayuda"
+};
+
+// Ancho de la barra: se calcula para que las etiquetas no se solapen.
+static int MenuBarItemWidth() {
+    int widest = 0;
+    for (int i = 0; i < MENU_COUNT; ++i) {
+        int w = TextWidth(MENU_TITLES[i], UI_TEXT_SCALE);
+        if (w > widest)
+            widest = w;
+    }
+    return widest + 18;
+}
+
+static int MenuBarItemX(int index) {
+    return 6 + index * MenuBarItemWidth();
+}
 
 struct MenuItem {
     std::string label;
     int         command;
     bool        separator;
+    bool        checked;
+    bool        has_submenu;
 };
+
+static MenuItem Item(const std::string &label, int command) {
+    MenuItem it;
+    it.label       = label;
+    it.command     = command;
+    it.separator   = false;
+    it.checked     = false;
+    it.has_submenu = false;
+    return it;
+}
+
+static MenuItem Checked(const std::string &label, int command, bool on) {
+    MenuItem it = Item(label, command);
+    it.checked  = on;
+    return it;
+}
+
+static MenuItem Separator() {
+    MenuItem it = Item("", 0);
+    it.separator = true;
+    return it;
+}
+
+static MenuItem SubmenuItem(const std::string &label, int submenu) {
+    MenuItem it = Item(label, submenu);
+    it.has_submenu = true;
+    return it;
+}
 
 static std::vector<MenuItem> MenuItems(int menu) {
     std::vector<MenuItem> items;
     switch (menu) {
     case MENU_FILE:
-        items.push_back({ "Abrir ROM...  (Ctrl+O)", CMD_FILE_OPEN, false });
-        items.push_back({ "", 0, true });
-        items.push_back({ "Salir", CMD_FILE_EXIT, false });
+        items.push_back(Item("Abrir ROM...  (Ctrl+O)", CMD_FILE_OPEN));
+        items.push_back(Separator());
+        items.push_back(Item("Salir", CMD_FILE_EXIT));
         break;
     case MENU_EMU:
-        items.push_back({ "Reiniciar", CMD_EMU_RESET, false });
-        items.push_back({ "Pausa  (Espacio)", CMD_EMU_PAUSE, false });
+        items.push_back(Item("Reiniciar", CMD_EMU_RESET));
+        items.push_back(Checked("Pausa  (Espacio)", CMD_EMU_PAUSE, g_paused));
         break;
     case MENU_STATE:
         for (int i = 0; i < WSCAMP_STATE_SLOTS; ++i) {
             char buf[64];
             snprintf(buf, sizeof(buf), "Guardar estado %d", i);
-            items.push_back({ buf, CMD_SAVE_STATE_BASE + i, false });
+            items.push_back(Item(buf, CMD_SAVE_STATE_BASE + i));
         }
-        items.push_back({ "", 0, true });
+        items.push_back(Separator());
         for (int i = 0; i < WSCAMP_STATE_SLOTS; ++i) {
             char buf[64];
             snprintf(buf, sizeof(buf), "Cargar estado %d", i);
-            items.push_back({ buf, CMD_LOAD_STATE_BASE + i, false });
+            items.push_back(Item(buf, CMD_LOAD_STATE_BASE + i));
         }
         break;
-    case MENU_HELP:
-        items.push_back({ "Acerca de " WSCAMP_APP_NAME "...", CMD_HELP_ABOUT, false });
+    case MENU_OPTIONS:
+        items.push_back(SubmenuItem("Video", SUB_VIDEO));
+        items.push_back(SubmenuItem("Sonido", SUB_SOUND));
+        items.push_back(SubmenuItem("Controles", SUB_INPUT));
         break;
+    case MENU_HELP:
+        items.push_back(Item("Acerca de " WSCAMP_APP_NAME "...", CMD_HELP_ABOUT));
+        break;
+    default: break;
+    }
+    return items;
+}
+
+static std::vector<MenuItem> SubMenuItems(int submenu) {
+    std::vector<MenuItem> items;
+    switch (submenu) {
+    case SUB_VIDEO:
+        items.push_back(Checked("Zoom 1x", CMD_VIDEO_ZOOM_1, g_cfg.zoom == 1));
+        items.push_back(Checked("Zoom 2x", CMD_VIDEO_ZOOM_2, g_cfg.zoom == 2));
+        items.push_back(Checked("Zoom 3x", CMD_VIDEO_ZOOM_3, g_cfg.zoom == 3));
+        items.push_back(Checked("Zoom 4x", CMD_VIDEO_ZOOM_4, g_cfg.zoom == 4));
+        items.push_back(Separator());
+        items.push_back(Checked("Voltear imagen  (F1)", CMD_VIDEO_FLIP, g_cfg.flip));
+        break;
+    case SUB_SOUND:
+        items.push_back(Checked("Silencio general", CMD_SOUND_MASTER, !g_cfg.master));
+        items.push_back(Separator());
+        for (int i = 0; i < SND_COUNT; ++i)
+            items.push_back(Checked(SoundItemName(i), CMD_SOUND_CH_BASE + i,
+                                    g_cfg.sound[i]));
+        break;
+    case SUB_INPUT: {
+        for (int b = 0; b < WSB_COUNT; ++b) {
+            std::string label = std::string(WsButtonName(b)) + ": " +
+                                KeyDisplayName(g_cfg.bind[b]);
+            items.push_back(Item(label, CMD_INPUT_BIND_BASE + b));
+        }
+        items.push_back(Separator());
+        items.push_back(Item("Restaurar valores por defecto", CMD_INPUT_RESET));
+        break;
+    }
     default: break;
     }
     return items;
@@ -833,28 +911,31 @@ static void UpdateWindowTitle() {
     SDL_SetWindowTitle(g_window, title.c_str());
 }
 
-static void ExecuteCommand(int cmd) {
-    if (cmd == CMD_FILE_OPEN) {
-        OpenRomBrowser();
-    } else if (cmd == CMD_FILE_EXIT) {
-        g_running = false;
-    } else if (cmd == CMD_EMU_RESET) {
-        if (g_game_loaded) g_core.retro_reset();
-    } else if (cmd == CMD_EMU_PAUSE) {
-        g_paused = !g_paused;
-        UpdateWindowTitle();
-    } else if (cmd == CMD_HELP_ABOUT) {
-        ShowAbout();
-    } else if (cmd >= CMD_SAVE_STATE_BASE && cmd < CMD_SAVE_STATE_BASE + WSCAMP_STATE_SLOTS) {
-        int slot = cmd - CMD_SAVE_STATE_BASE;
-        SetStatus(SaveState(slot) ? ("Estado guardado en ranura " + std::to_string(slot))
-                                  : ("No se pudo guardar la ranura " + std::to_string(slot)));
-    } else if (cmd >= CMD_LOAD_STATE_BASE && cmd < CMD_LOAD_STATE_BASE + WSCAMP_STATE_SLOTS) {
-        int slot = cmd - CMD_LOAD_STATE_BASE;
-        SetStatus(LoadState(slot) ? ("Estado cargado de la ranura " + std::to_string(slot))
-                                  : ("No se pudo cargar la ranura " + std::to_string(slot)));
+// Ajusta la ventana al zoom elegido; el usuario puede redimensionarla despues.
+static void ApplyWindowSize() {
+    if (g_window == nullptr)
+        return;
+
+    unsigned base_w = 224;
+    unsigned base_h = 144;
+    if (g_av.geometry.base_width > 0 && g_av.geometry.base_height > 0) {
+        base_w = g_av.geometry.base_width;
+        base_h = g_av.geometry.base_height;
     }
+    if (g_rotation == 90 || g_rotation == 270)
+        std::swap(base_w, base_h);
+
+    SDL_SetWindowSize(g_window,
+                      (int)base_w * g_cfg.zoom,
+                      (int)base_h * g_cfg.zoom + MENUBAR_H);
 }
+
+static void SaveConfig() {
+    if (!g_config_path.empty())
+        g_cfg.Save(g_config_path);
+}
+
+static void ExecuteCommand(int cmd);
 
 // ---------------------------------------------------------------------------
 // Dibujo de la interfaz
@@ -882,13 +963,22 @@ static void RenderEmulator(int ww, int wh) {
             SDL_UpdateTexture(g_texture, nullptr, g_display.data(),
                               (int)g_display_w * 4);
 
-            double scale = (double)ww / g_display_w;
-            double sy = (double)view_h / g_display_h;
-            if (sy < scale) scale = sy;
-            if (scale <= 0.0) scale = 1.0;
+            // El zoom manda: la imagen se dibuja a zoom * pixel de juego y se
+            // reduce solo si no cabe en la ventana.
+            int dw = (int)g_display_w * g_cfg.zoom;
+            int dh = (int)g_display_h * g_cfg.zoom;
 
-            int dw = (int)(g_display_w * scale);
-            int dh = (int)(g_display_h * scale);
+            double fit = 1.0;
+            if (dw > ww && dw > 0) fit = (double)ww / dw;
+            if (dh > view_h && dh > 0) {
+                double f2 = (double)view_h / dh;
+                if (f2 < fit) fit = f2;
+            }
+            if (fit < 1.0) {
+                dw = (int)(dw * fit);
+                dh = (int)(dh * fit);
+            }
+
             int dx = (ww - dw) / 2;
             int dy = MENUBAR_H + (view_h - dh) / 2;
 
@@ -900,11 +990,12 @@ static void RenderEmulator(int ww, int wh) {
     // Barra de menus
     FillRect(g_renderer, 0, 0, ww, MENUBAR_H, SDL_Color{ 55, 55, 65, 255 });
     SDL_Color fg = { 230, 230, 235, 255 };
+    int item_w = MenuBarItemWidth();
     for (int i = 0; i < MENU_COUNT; ++i) {
-        int x = 6 + i * MENUBAR_ITEM_W;
+        int x = MenuBarItemX(i);
         bool hot = (g_menu_open == i);
         if (hot)
-            FillRect(g_renderer, x - 4, 2, MENUBAR_ITEM_W - 4, MENUBAR_H - 4,
+            FillRect(g_renderer, x - 4, 2, item_w - 4, MENUBAR_H - 4,
                      SDL_Color{ 90, 90, 105, 255 });
         DrawText(g_renderer, x, 7, MENU_TITLES[i], UI_TEXT_SCALE, fg);
     }
@@ -917,29 +1008,67 @@ static void RenderEmulator(int ww, int wh) {
     }
 }
 
+// Ancho que necesita una lista desplegable.
+static int ListWidth(const std::vector<MenuItem> &items) {
+    int w = MENU_ITEM_W;
+    for (const MenuItem &it : items) {
+        int lw = TextWidth(it.label, UI_TEXT_SCALE) + 46;
+        if (lw > w)
+            w = lw;
+    }
+    return w;
+}
+
+// Dibuja una lista desplegable y devuelve su altura total.
+static int RenderList(int x, int y, const std::vector<MenuItem> &items, int focus) {
+    int w = ListWidth(items);
+    int h = (int)items.size() * MENU_ITEM_H + 4;
+    FillRect(g_renderer, x, y, w, h, SDL_Color{ 45, 45, 55, 255 });
+    SDL_Color border = { 140, 140, 155, 255 };
+    FillRect(g_renderer, x, y, w, 1, border);
+    FillRect(g_renderer, x, y, 1, h, border);
+    FillRect(g_renderer, x + w - 1, y, 1, h, border);
+    FillRect(g_renderer, x, y + h - 1, w, 1, border);
+
+    int my = y + 2;
+    for (size_t i = 0; i < items.size(); ++i) {
+        const MenuItem &it = items[i];
+        if (focus >= 0 && (int)i == focus)
+            FillRect(g_renderer, x + 1, my, w - 2, MENU_ITEM_H,
+                     SDL_Color{ 80, 80, 100, 255 });
+
+        if (it.separator) {
+            FillRect(g_renderer, x + 4, my + MENU_ITEM_H / 2, w - 8, 1,
+                     SDL_Color{ 100, 100, 115, 255 });
+        } else {
+            SDL_Color c = { 230, 230, 235, 255 };
+            if (it.checked)
+                DrawText(g_renderer, x + 6, my + 4, ">", UI_TEXT_SCALE,
+                         SDL_Color{ 150, 230, 150, 255 });
+            DrawText(g_renderer, x + 22, my + 4, it.label, UI_TEXT_SCALE, c);
+            if (it.has_submenu)
+                DrawText(g_renderer, x + w - 14, my + 4, ">", UI_TEXT_SCALE,
+                         SDL_Color{ 200, 200, 210, 255 });
+        }
+        my += MENU_ITEM_H;
+    }
+    return h;
+}
+
 static void RenderMenuDropdown() {
     if (g_menu_open < 0)
         return;
 
     std::vector<MenuItem> items = MenuItems(g_menu_open);
-    int x = 6 + g_menu_open * MENUBAR_ITEM_W - 4;
+    int x = MenuBarItemX(g_menu_open) - 4;
     int y = MENUBAR_H;
+    int parent_w = ListWidth(items);
+    RenderList(x, y, items, g_submenu == SUB_NONE ? g_menu_sel : -1);
 
-    FillRect(g_renderer, x, y, MENU_ITEM_W, (int)items.size() * MENU_ITEM_H + 4,
-             SDL_Color{ 45, 45, 55, 255 });
-    SDL_Color border = { 140, 140, 155, 255 };
-    FillRect(g_renderer, x, y, MENU_ITEM_W, 1, border);
-
-    int my = y + 2;
-    for (const MenuItem &it : items) {
-        if (!it.separator) {
-            SDL_Color c = { 230, 230, 235, 255 };
-            DrawText(g_renderer, x + 8, my + 4, it.label, UI_TEXT_SCALE, c);
-        } else {
-            FillRect(g_renderer, x + 4, my + MENU_ITEM_H / 2, MENU_ITEM_W - 8, 1,
-                     SDL_Color{ 100, 100, 115, 255 });
-        }
-        my += MENU_ITEM_H;
+    if (g_submenu != SUB_NONE) {
+        std::vector<MenuItem> sub = SubMenuItems(g_submenu);
+        int sy = y + 2 + g_menu_sel * MENU_ITEM_H;
+        RenderList(x + parent_w, sy, sub, g_submenu_sel);
     }
 }
 
@@ -971,12 +1100,67 @@ static void RenderBrowser(int ww, int wh) {
 }
 
 // ---------------------------------------------------------------------------
-// Bucle principal
+// Navegacion del menu
 // ---------------------------------------------------------------------------
+static void MoveMenuSelection(int delta) {
+    bool in_sub = (g_submenu != SUB_NONE);
+    std::vector<MenuItem> items = in_sub ? SubMenuItems(g_submenu)
+                                         : MenuItems(g_menu_open);
+    if (items.empty())
+        return;
 
+    int &sel = in_sub ? g_submenu_sel : g_menu_sel;
+    int count = (int)items.size();
+    for (int guard = 0; guard < count; ++guard) {
+        sel = (sel + delta + count) % count;
+        if (!items[(size_t)sel].separator)
+            break;
+    }
+}
+
+static void ActivateMenuSelection() {
+    if (g_submenu != SUB_NONE) {
+        std::vector<MenuItem> sub = SubMenuItems(g_submenu);
+        if (g_submenu_sel >= 0 && g_submenu_sel < (int)sub.size() &&
+            !sub[(size_t)g_submenu_sel].separator)
+            ExecuteCommand(sub[(size_t)g_submenu_sel].command);
+        return;
+    }
+
+    std::vector<MenuItem> items = MenuItems(g_menu_open);
+    if (g_menu_sel < 0 || g_menu_sel >= (int)items.size())
+        return;
+    const MenuItem &it = items[(size_t)g_menu_sel];
+    if (it.separator)
+        return;
+    if (it.has_submenu) {
+        g_submenu     = it.command;
+        g_submenu_sel = 0;
+        return;
+    }
+    ExecuteCommand(it.command);
+}
 
 static void HandleKeyDown(const SDL_KeyboardEvent &k) {
     bool ctrl = (k.keysym.mod & KMOD_CTRL) != 0;
+
+    // Captura de tecla para el remapeo de un boton.
+    if (g_capture_button >= 0) {
+        if (k.keysym.sym != SDLK_ESCAPE) {
+            SDL_Scancode sc = k.keysym.scancode;
+            // No se admite robar las teclas de la propia interfaz.
+            if (sc != SDL_SCANCODE_ESCAPE) {
+                g_cfg.bind[g_capture_button] = sc;
+                SetStatus(std::string("Boton ") + WsButtonName(g_capture_button) +
+                          " = " + KeyDisplayName(sc));
+                SaveConfig();
+            }
+        } else {
+            SetStatus("Remapeo cancelado");
+        }
+        g_capture_button = -1;
+        return;
+    }
 
     if (g_browsing) {
         if (k.keysym.sym == SDLK_ESCAPE) {
@@ -994,13 +1178,77 @@ static void HandleKeyDown(const SDL_KeyboardEvent &k) {
         return;
     }
 
-    if (k.keysym.sym == SDLK_ESCAPE) {
-        g_menu_open = -1;
-    } else if (ctrl && k.keysym.sym == SDLK_o) {
+    // Volteo de la imagen: la tecla configurada (F1 por defecto).
+    if (k.keysym.scancode == g_cfg.key_flip && g_menu_open < 0) {
+        g_cfg.flip = !g_cfg.flip;
+        g_rotation = g_cfg.flip ? 180u : 0u;
+        SaveConfig();
+        SetStatus(g_cfg.flip ? "Imagen volteada" : "Imagen normal");
+        return;
+    }
+
+    if (g_menu_open >= 0) {
+        if (k.keysym.sym == SDLK_ESCAPE) {
+            if (g_submenu != SUB_NONE) {
+                g_submenu     = SUB_NONE;
+                g_submenu_sel = 0;
+            } else {
+                g_menu_open = -1;
+            }
+        } else if (k.keysym.sym == SDLK_DOWN) {
+            MoveMenuSelection(1);
+        } else if (k.keysym.sym == SDLK_UP) {
+            MoveMenuSelection(-1);
+        } else if (k.keysym.sym == SDLK_RIGHT) {
+            if (g_submenu == SUB_NONE) {
+                std::vector<MenuItem> items = MenuItems(g_menu_open);
+                if (g_menu_sel < (int)items.size() &&
+                    items[(size_t)g_menu_sel].has_submenu) {
+                    g_submenu     = items[(size_t)g_menu_sel].command;
+                    g_submenu_sel = 0;
+                }
+            }
+        } else if (k.keysym.sym == SDLK_LEFT) {
+            if (g_submenu != SUB_NONE) {
+                g_submenu     = SUB_NONE;
+                g_submenu_sel = 0;
+            } else {
+                g_menu_open = (g_menu_open + MENU_COUNT - 1) % MENU_COUNT;
+                g_menu_sel  = 0;
+                g_submenu_sel = 0;
+            }
+        } else if (k.keysym.sym == SDLK_RETURN || k.keysym.sym == SDLK_KP_ENTER) {
+            ActivateMenuSelection();
+        }
+        return;
+    }
+
+    if (ctrl && k.keysym.sym == SDLK_o) {
         ExecuteCommand(CMD_FILE_OPEN);
     } else if (k.keysym.sym == SDLK_SPACE) {
         ExecuteCommand(CMD_EMU_PAUSE);
+    } else if (k.keysym.sym == SDLK_ESCAPE) {
+        g_menu_open = -1;
+        g_submenu   = SUB_NONE;
     }
+}
+
+// Rectangulo de una lista desplegable, para saber si el raton la toca.
+static bool ListHit(int x, int y, const std::vector<MenuItem> &items,
+                    int mx, int my, int *index) {
+    int w = ListWidth(items);
+    int h = (int)items.size() * MENU_ITEM_H + 4;
+    if (mx < x || mx >= x + w || my < y || my >= y + h)
+        return false;
+
+    int idx = (my - (y + 2)) / MENU_ITEM_H;
+    if (idx < 0 || idx >= (int)items.size())
+        return false;
+    if (items[(size_t)idx].separator)
+        return false;
+    if (index != nullptr)
+        *index = idx;
+    return true;
 }
 
 static void HandleMouseDown(const SDL_MouseButtonEvent &m) {
@@ -1008,28 +1256,49 @@ static void HandleMouseDown(const SDL_MouseButtonEvent &m) {
         return;
 
     if (m.y < MENUBAR_H) {
-        int idx = (m.x - 6 + 4) / MENUBAR_ITEM_W;
+        int item_w = MenuBarItemWidth();
+        int idx = (m.x - 6 + 4) / item_w;
         if (idx >= 0 && idx < MENU_COUNT) {
-            g_menu_open = (g_menu_open == idx) ? -1 : idx;
+            g_menu_open   = (g_menu_open == idx) ? -1 : idx;
+            g_submenu     = SUB_NONE;
+            g_menu_sel    = 0;
+            g_submenu_sel = 0;
             return;
         }
     }
 
     if (g_menu_open >= 0) {
         std::vector<MenuItem> items = MenuItems(g_menu_open);
-        int x = 6 + g_menu_open * MENUBAR_ITEM_W - 4;
-        int y = MENUBAR_H + 2;
-        int hit = (m.y - y) / MENU_ITEM_H;
-        if (m.x >= x && m.x < x + MENU_ITEM_W && hit >= 0 && hit < (int)items.size()) {
-            const MenuItem &it = items[(size_t)hit];
-            if (!it.separator) {
-                g_menu_open = -1;
-                ExecuteCommand(it.command);
+        int x = MenuBarItemX(g_menu_open) - 4;
+        int y = MENUBAR_H;
+        int idx = -1;
+
+        if (ListHit(x, y, items, m.x, m.y, &idx)) {
+            g_menu_sel = idx;
+            const MenuItem &it = items[(size_t)idx];
+            if (it.has_submenu) {
+                g_submenu     = it.command;
+                g_submenu_sel = 0;
+                return;
             }
-        } else {
-            g_menu_open = -1;
+            g_menu_open  = -1;
+            g_submenu    = SUB_NONE;
+            ExecuteCommand(it.command);
+            return;
         }
-        return;
+
+        if (g_submenu != SUB_NONE) {
+            std::vector<MenuItem> sub = SubMenuItems(g_submenu);
+            int sx = x + ListWidth(items);
+            int sy = MENUBAR_H + 2 + g_menu_sel * MENU_ITEM_H;
+            if (ListHit(sx, sy, sub, m.x, m.y, &idx)) {
+                ExecuteCommand(sub[(size_t)idx].command);
+                return;
+            }
+        }
+
+        g_menu_open = -1;
+        g_submenu   = SUB_NONE;
     }
 }
 
@@ -1044,6 +1313,76 @@ static void HandleBrowserMouse(const SDL_MouseButtonEvent &m) {
             return;
         }
         y += h;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ejecucion de comandos de menu
+// ---------------------------------------------------------------------------
+static void ExecuteCommand(int cmd) {
+    if (cmd == CMD_FILE_OPEN) {
+        g_menu_open = -1;
+        g_submenu   = SUB_NONE;
+
+        // Primero el dialogo nativo; si no esta disponible o se cancela,
+        // se ofrece el explorador integrado.
+        std::string picked = OpenFileDialog(g_window, BrowseStartDir());
+        if (!picked.empty())
+            LoadGame(picked);
+        else
+            OpenBuiltinBrowser();
+    } else if (cmd == CMD_FILE_EXIT) {
+        g_running = false;
+    } else if (cmd == CMD_EMU_RESET) {
+        if (g_game_loaded) g_core.retro_reset();
+    } else if (cmd == CMD_EMU_PAUSE) {
+        g_paused = !g_paused;
+        UpdateWindowTitle();
+    } else if (cmd == CMD_HELP_ABOUT) {
+        g_menu_open = -1;
+        g_submenu   = SUB_NONE;
+        ShowAbout();
+    } else if (cmd >= CMD_VIDEO_ZOOM_1 && cmd <= CMD_VIDEO_ZOOM_4) {
+        g_cfg.zoom = cmd - CMD_VIDEO_ZOOM_1 + 1;
+        ApplyWindowSize();
+        SaveConfig();
+        SetStatus("Zoom " + std::to_string(g_cfg.zoom) + "x");
+    } else if (cmd == CMD_VIDEO_FLIP) {
+        g_cfg.flip = !g_cfg.flip;
+        g_rotation = g_cfg.flip ? 180u : 0u;
+        SaveConfig();
+        SetStatus(g_cfg.flip ? "Imagen volteada" : "Imagen normal");
+    } else if (cmd == CMD_SOUND_MASTER) {
+        g_cfg.master = !g_cfg.master;
+        g_options_dirty = true;
+        ApplyMasterMute();
+        SaveConfig();
+        SetStatus(g_cfg.master ? "Sonido activado" : "Sonido silenciado");
+    } else if (cmd >= CMD_SOUND_CH_BASE && cmd < CMD_SOUND_CH_BASE + SND_COUNT) {
+        int i = cmd - CMD_SOUND_CH_BASE;
+        g_cfg.sound[i] = !g_cfg.sound[i];
+        g_options_dirty = true;
+        SaveConfig();
+        SetStatus(std::string(SoundItemName(i)) +
+                  (g_cfg.sound[i] ? ": activado" : ": desactivado"));
+    } else if (cmd >= CMD_INPUT_BIND_BASE && cmd < CMD_INPUT_BIND_BASE + WSB_COUNT) {
+        g_capture_button = cmd - CMD_INPUT_BIND_BASE;
+        SetStatus(std::string("Pulsa la tecla para ") +
+                  WsButtonName(g_capture_button) + "  (Esc cancela)");
+    } else if (cmd == CMD_INPUT_RESET) {
+        Config defaults;
+        for (int b = 0; b < WSB_COUNT; ++b)
+            g_cfg.bind[b] = defaults.bind[b];
+        SaveConfig();
+        SetStatus("Controles restaurados");
+    } else if (cmd >= CMD_SAVE_STATE_BASE && cmd < CMD_SAVE_STATE_BASE + WSCAMP_STATE_SLOTS) {
+        int slot = cmd - CMD_SAVE_STATE_BASE;
+        SetStatus(SaveState(slot) ? ("Estado guardado en ranura " + std::to_string(slot))
+                                  : ("No se pudo guardar la ranura " + std::to_string(slot)));
+    } else if (cmd >= CMD_LOAD_STATE_BASE && cmd < CMD_LOAD_STATE_BASE + WSCAMP_STATE_SLOTS) {
+        int slot = cmd - CMD_LOAD_STATE_BASE;
+        SetStatus(LoadState(slot) ? ("Estado cargado de la ranura " + std::to_string(slot))
+                                  : ("No se pudo cargar la ranura " + std::to_string(slot)));
     }
 }
 
@@ -1089,6 +1428,23 @@ static int SelfTest(const std::string &rom_path) {
         return 1;
     }
 
+    // Configuracion: guardar, releer y comprobar que se conserva.
+    g_cfg.zoom   = 3;
+    g_cfg.flip   = true;
+    g_cfg.sound[SND_NOISE] = false;
+    g_cfg.bind[WSB_A] = SDL_SCANCODE_K;
+    g_cfg.Save(g_config_path);
+
+    Config reread;
+    reread.Load(g_config_path);
+    if (reread.zoom != 3 || !reread.flip || reread.sound[SND_NOISE] ||
+        reread.bind[WSB_A] != SDL_SCANCODE_K) {
+        fprintf(stderr, "SELFTEST FALLO: el INI no conserva la configuracion\n");
+        StopCore();
+        return 1;
+    }
+    printf("SELFTEST: configuracion guardada y releida de %s\n", g_config_path.c_str());
+
     printf("SELFTEST: OK (version %s)\n", WSCAMP_VERSION_STRING);
     StopCore();
     return 0;
@@ -1104,6 +1460,12 @@ int main(int argc, char *argv[]) {
     g_system_dir = g_exe_dir;
     g_save_dir   = JoinPath(g_exe_dir, "saves");
     g_assets_dir = JoinPath(g_exe_dir, "system");
+    g_config_path = JoinPath(g_exe_dir, "WsCampReborn.ini");
+
+    // La configuracion se lee antes de crear la ventana: el zoom decide su
+    // tamano inicial.
+    g_cfg.Load(g_config_path);
+    g_rotation = g_cfg.flip ? 180u : 0u;
 
     if (argc > 2 && strcmp(argv[1], "--selftest") == 0) {
         int rc = SelfTest(argv[2]);
@@ -1113,7 +1475,7 @@ int main(int argc, char *argv[]) {
 
     g_window = SDL_CreateWindow(WSCAMP_VERSION_FULL,
                                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                448 * 2, 288 * 2 + MENUBAR_H,
+                                224 * g_cfg.zoom, 144 * g_cfg.zoom + MENUBAR_H,
                                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (g_window == nullptr) {
         fprintf(stderr, "SDL_CreateWindow fallo: %s\n", SDL_GetError());
@@ -1173,7 +1535,7 @@ int main(int argc, char *argv[]) {
         if (!g_running)
             break;
 
-        if (g_game_loaded && !g_paused) {
+        if (g_game_loaded && !g_paused && !g_browsing && g_menu_open < 0) {
             g_core.retro_run();
             fps = (g_av.timing.fps > 0.0) ? g_av.timing.fps : 60.0;
         }
@@ -1190,7 +1552,7 @@ int main(int argc, char *argv[]) {
         SDL_RenderPresent(g_renderer);
 
         // Sincronizacion de frames.
-        if (g_game_loaded && !g_paused && !g_browsing) {
+        if (g_game_loaded && !g_paused && !g_browsing && g_menu_open < 0) {
             double frame_ms = 1000.0 / fps;
             next_frame += (Uint64)frame_ms;
             Uint64 now = SDL_GetTicks64();
@@ -1205,6 +1567,9 @@ int main(int argc, char *argv[]) {
             SDL_Delay(16);
         }
     }
+
+    // Al salir se guarda toda la configuracion.
+    SaveConfig();
 
     StopCore();
     if (g_texture) SDL_DestroyTexture(g_texture);

@@ -2,6 +2,7 @@
 build/
 *.o
 *.exe
+/WsCampReborn
 
 # Nucleo libretro (binario de terceros, no se versiona)
 lib/*.dll
@@ -11,8 +12,9 @@ lib/*.dylib
 *.so
 *.dylib
 
-# Estados guardados y registro
+# Estados guardados, configuracion y registro
 saves/
+WsCampReborn.ini
 wscamp.log
 
 # Sistema
