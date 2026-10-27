@@ -215,14 +215,8 @@ jobs:
 
           Version compilada desde \`src/version.h\` (commit ${GITHUB_SHA}).
 
-          ### Antes de ejecutar
-          Copia el nucleo libretro junto al ejecutable o en \`lib/\`:
-
-          - Linux:   \`mednafen_wswan_libretro.so\`
-          - Windows: \`mednafen_wswan_libretro.dll\`
-          - macOS:   \`mednafen_wswan_libretro.dylib\`
-
-          Descargalo como build \`beetle-wswan-libretro\`.
+          Cada paquete incluye el nucleo libretro con control por canal de sonido
+          y, en Windows, \`SDL2.dll\`. En Linux y macOS hace falta SDL2 del sistema.
           EOF
 
           # Crea o mueve el tag "latest" al commit actual.
@@ -233,6 +227,17 @@ jobs:
             gh release edit "$TAG" --title "WsCampReborn ${V}" --notes-file notes.md
             # shellcheck disable=SC2086
             gh release upload "$TAG" $ASSETS --clobber
+
+            # El release "latest" conserva los paquetes de versiones anteriores
+            # al reemplazar los ficheros, asi que se retiran los que no son de
+            # esta version.
+            for name in $(gh release view "$TAG" --json assets \
+                            --jq '.assets[].name' | grep '^WsCampReborn-'); do
+              case "$name" in
+                *"-${V}-"*) ;;
+                *) echo "Retirando $name"; gh release delete-asset "$TAG" "$name" --yes ;;
+              esac
+            done
           else
             # shellcheck disable=SC2086
             gh release create "$TAG" $ASSETS \
