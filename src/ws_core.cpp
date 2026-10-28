@@ -1,20 +1,62 @@
 // ws_core.cpp -- Cargador dinamico portable del nucleo libretro.
 #include "ws_core.h"
 
-#include <SDL.h>
+#if defined(_WIN32)
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#else
+#  include <dlfcn.h>
+#endif
+
+namespace {
+
+void *LoadLibraryAt(const std::string &path) {
+#if defined(_WIN32)
+    return (void *)LoadLibraryA(path.c_str());
+#else
+    return dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+}
+
+void *LoadSymbolAt(void *handle, const char *name) {
+#if defined(_WIN32)
+    return (void *)GetProcAddress((HMODULE)handle, name);
+#else
+    return dlsym(handle, name);
+#endif
+}
+
+void UnloadLibraryAt(void *handle) {
+#if defined(_WIN32)
+    FreeLibrary((HMODULE)handle);
+#else
+    dlclose(handle);
+#endif
+}
+
+std::string LastLoadError() {
+#if defined(_WIN32)
+    return "error " + std::to_string(GetLastError());
+#else
+    const char *e = dlerror();
+    return (e != nullptr) ? std::string(e) : std::string("error desconocido");
+#endif
+}
+
+} // namespace
 
 bool WsCore::Load(const std::string &library_path) {
     Unload();
     last_error_.clear();
 
-    handle_ = SDL_LoadObject(library_path.c_str());
+    handle_ = LoadLibraryAt(library_path);
     if (handle_ == nullptr) {
         last_error_ = std::string("No se pudo cargar la biblioteca: ") +
-                      library_path + " (" + SDL_GetError() + ")";
+                      library_path + " (" + LastLoadError() + ")";
         return false;
     }
 
-    // SDL_LoadFunction devuelve un puntero sin tipo; convertirlo a un puntero
+    // La funcion devuelve un puntero sin tipo; convertirlo a un puntero
     // de funcion tipado siempre dispara -Wcast-function-type, pero es el patron
     // estandar de carga dinamica.
 #if defined(__GNUC__)
@@ -24,7 +66,7 @@ bool WsCore::Load(const std::string &library_path) {
 
 #define WS_BIND(fn)                                                        \
     do {                                                                   \
-        void *proc = SDL_LoadFunction(handle_, #fn);                       \
+        void *proc = LoadSymbolAt(handle_, #fn);                           \
         if (proc == nullptr) {                                             \
             last_error_ = std::string("Simbolo no exportado: ") + #fn;     \
             Unload();                                                      \
@@ -68,12 +110,12 @@ bool WsCore::Load(const std::string &library_path) {
 void *WsCore::Symbol(const char *name) const {
     if (handle_ == nullptr || name == nullptr)
         return nullptr;
-    return SDL_LoadFunction(handle_, name);
+    return LoadSymbolAt(handle_, name);
 }
 
 void WsCore::Unload() {
     if (handle_ != nullptr) {
-        SDL_UnloadObject(handle_);
+        UnloadLibraryAt(handle_);
         handle_ = nullptr;
     }
 

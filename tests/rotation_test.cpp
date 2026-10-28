@@ -14,8 +14,6 @@
 //
 // Uso: rotation_test <nucleo> <rom>
 
-#include <SDL.h>
-
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -181,11 +179,6 @@ int main(int argc, char **argv) {
     const std::string core_path = argv[1];
     const std::string rom_path  = argv[2];
 
-    if (SDL_Init(SDL_INIT_EVENTS) != 0) {
-        fprintf(stderr, "SDL_Init fallo: %s\n", SDL_GetError());
-        return 1;
-    }
-
     bool  ok = true;
     Probe p;
 
@@ -193,12 +186,12 @@ int main(int argc, char **argv) {
     g_hw_rotate    = false;   // el nucleo rota en software
     g_keymap_opt   = "auto";
     g_rotation_opt = "landscape";
-    if (!LoadOk(core_path, rom_path, p)) { SDL_Quit(); return 1; }
+    if (!LoadOk(core_path, rom_path, p)) return 1;
     printf("horizontal: %ux%u (se espera 224x144)\n", p.w, p.h);
     ok &= (p.w == 224 && p.h == 144);
 
     g_rotation_opt = "portrait";
-    if (!LoadOk(core_path, rom_path, p)) { SDL_Quit(); return 1; }
+    if (!LoadOk(core_path, rom_path, p)) return 1;
     printf("vertical  : %ux%u (se espera 144x224)\n", p.w, p.h);
     ok &= (p.w == 144 && p.h == 224);
 
@@ -207,12 +200,12 @@ int main(int argc, char **argv) {
     // Y en su lugar, para que "arriba" siga siendo arriba.
     g_keymap_opt   = "auto";
     g_rotation_opt = "landscape";
-    if (!LoadOk(core_path, rom_path, p)) { SDL_Quit(); return 1; }
+    if (!LoadOk(core_path, rom_path, p)) return 1;
     const unsigned short auto_landscape = p.input_buf;
 
     g_keymap_opt   = "auto";
     g_rotation_opt = "portrait";
-    if (!LoadOk(core_path, rom_path, p)) { SDL_Quit(); return 1; }
+    if (!LoadOk(core_path, rom_path, p)) return 1;
     const unsigned short auto_portrait = p.input_buf;
 
     printf("auto: horizontal=0x%04x vertical=0x%04x (deben cambiar)\n",
@@ -228,12 +221,12 @@ int main(int argc, char **argv) {
     // --- Con el remapeo fijado, el registro no cambia al girar ---
     g_keymap_opt   = "disabled";
     g_rotation_opt = "landscape";
-    if (!LoadOk(core_path, rom_path, p)) { SDL_Quit(); return 1; }
+    if (!LoadOk(core_path, rom_path, p)) return 1;
     const unsigned short fixed_landscape = p.input_buf;
 
     g_keymap_opt   = "disabled";
     g_rotation_opt = "portrait";
-    if (!LoadOk(core_path, rom_path, p)) { SDL_Quit(); return 1; }
+    if (!LoadOk(core_path, rom_path, p)) return 1;
     const unsigned short fixed_portrait = p.input_buf;
 
     printf("fijo: horizontal=0x%04x vertical=0x%04x (deben coincidir)\n",
@@ -248,11 +241,10 @@ int main(int argc, char **argv) {
     g_hw_rotate = true;
     g_rot_seen  = false;
     g_rotation_opt = "portrait";
-    if (!LoadOk(core_path, rom_path, p)) { SDL_Quit(); return 1; }
+    if (!LoadOk(core_path, rom_path, p)) return 1;
     printf("SET_ROTATION pedido: %s\n", g_rot_seen ? "si" : "no");
     ok &= g_rot_seen;
 
-    SDL_Quit();
     printf(ok ? "ROTATIONTEST: OK\n" : "ROTATIONTEST: FALLO\n");
     return ok ? 0 : 1;
 }

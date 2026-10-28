@@ -1,7 +1,7 @@
 // ws_core.h -- ABI minima de libretro y cargador dinamico portable del nucleo.
 //
-// La carga usa SDL_LoadObject/SDL_LoadFunction, que envuelve dlopen en
-// Linux/macOS y LoadLibrary en Windows. No se enlaza ninguna libreria de
+// La carga usa dlopen/LoadLibrary directamente, asi que no depende de SDL y
+// vale igual para el backend nativo de Windows. No se enlaza ninguna libreria de
 // importacion: todos los simbolos se resuelven en tiempo de ejecucion.
 #pragma once
 

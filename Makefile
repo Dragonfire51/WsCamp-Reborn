@@ -38,19 +38,17 @@ CXXFLAGS_COMMON := -std=c++17 -O2 -Wall -Wextra -Isrc $(VFLAGS)
 
 ifeq ($(CROSS),x86_64)
   CXX      := x86_64-w64-mingw32-g++
-  SDL_ROOT := /opt/sdl2-mingw/x86_64-w64-mingw32
   PLATFORM := windows-x86_64
   EXT      := .exe
-  PLATFLAGS := -municode -DUNICODE -D_UNICODE -I$(SDL_ROOT)/include/SDL2
-  LDLIBS   := -L$(SDL_ROOT)/lib -lmingw32 -lSDL2main -lSDL2 -mwindows \
+  PLATFLAGS := -DUNICODE -D_UNICODE
+  LDLIBS   := -mwindows -lgdi32 -lcomdlg32 -lwinmm -luser32 \
               -static-libgcc -static-libstdc++
 else ifeq ($(CROSS),i686)
   CXX      := i686-w64-mingw32-g++
-  SDL_ROOT := /opt/sdl2-mingw/i686-w64-mingw32
   PLATFORM := windows-i686
   EXT      := .exe
-  PLATFLAGS := -municode -DUNICODE -D_UNICODE -I$(SDL_ROOT)/include/SDL2
-  LDLIBS   := -L$(SDL_ROOT)/lib -lmingw32 -lSDL2main -lSDL2 -mwindows \
+  PLATFLAGS := -DUNICODE -D_UNICODE
+  LDLIBS   := -mwindows -lgdi32 -lcomdlg32 -lwinmm -luser32 \
               -static-libgcc -static-libstdc++
 else
   CXX      := c++
@@ -75,7 +73,15 @@ else
 endif
 
 TARGET := $(TARGET_NAME)$(EXT)
+
+# La capa de plataforma tiene dos implementaciones. En Windows manda la nativa
+# (GDI + menu del sistema) y no se compila nada de SDL; en el resto, SDL2.
 SRCS   := $(wildcard $(SRCDIR)/*.cpp)
+ifneq (,$(filter windows%,$(PLATFORM)))
+  SRCS := $(filter-out $(SRCDIR)/platform_sdl.cpp,$(SRCS))
+else
+  SRCS := $(filter-out $(SRCDIR)/platform_win32.cpp,$(SRCS))
+endif
 OBJS   := $(patsubst $(SRCDIR)/%.cpp,$(OBJDIR)/%.o,$(SRCS))
 
 .PHONY: all clean info core test
@@ -117,12 +123,11 @@ test: $(TARGET)
 		echo "test: sin nucleo en lib/, se omiten sound_test y rotation_test"; \
 	elif [ -n "$(ROM)" ]; then \
 		$(OBJDIR)/sound_test "$$CORE" "$(ROM)"; \
-		SDL_VIDEODRIVER=dummy $(OBJDIR)/rotation_test "$$CORE" "$(ROM)"; \
+		$(OBJDIR)/rotation_test "$$CORE" "$(ROM)"; \
 	else \
 		echo "test: sin ROM=<ruta>, se omiten sound_test y rotation_test"; \
 	fi
 	@if [ -n "$(ROM)" ]; then \
-		SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
 		./$(TARGET) --selftest "$(ROM)"; \
 	else \
 		echo "test: sin ROM=<ruta>, se omite la autocomprobacion"; \

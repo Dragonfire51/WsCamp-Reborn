@@ -14,22 +14,22 @@ bool        g_options_dirty = false;
 
 namespace {
 
-struct ButtonInfo { const char *key; const char *name; unsigned retro_id; SDL_Scancode def; };
+struct ButtonInfo { const char *key; const char *name; unsigned retro_id; WsKey def; };
 
 // Orden fijo: el indice es el valor que se guarda en el INI.
 const ButtonInfo BUTTONS[WSB_COUNT] = {
-    { "x_up",   "X Arriba",    RETRO_DEVICE_ID_JOYPAD_UP,    SDL_SCANCODE_W },
-    { "x_down", "X Abajo",     RETRO_DEVICE_ID_JOYPAD_DOWN,  SDL_SCANCODE_S },
-    { "x_left", "X Izquierda", RETRO_DEVICE_ID_JOYPAD_LEFT,  SDL_SCANCODE_A },
-    { "x_right","X Derecha",   RETRO_DEVICE_ID_JOYPAD_RIGHT, SDL_SCANCODE_D },
-    { "y_up",   "Y Arriba",    RETRO_DEVICE_ID_JOYPAD_L,     SDL_SCANCODE_UP },
-    { "y_down", "Y Abajo",     RETRO_DEVICE_ID_JOYPAD_L2,    SDL_SCANCODE_DOWN },
-    { "y_left", "Y Izquierda", RETRO_DEVICE_ID_JOYPAD_R,     SDL_SCANCODE_LEFT },
-    { "y_right","Y Derecha",   RETRO_DEVICE_ID_JOYPAD_R2,    SDL_SCANCODE_RIGHT },
-    { "a",      "Boton A",     RETRO_DEVICE_ID_JOYPAD_A,     SDL_SCANCODE_X },
-    { "b",      "Boton B",     RETRO_DEVICE_ID_JOYPAD_B,     SDL_SCANCODE_Z },
-    { "start",  "Start",       RETRO_DEVICE_ID_JOYPAD_START, SDL_SCANCODE_RETURN },
-    { "select", "Select",      RETRO_DEVICE_ID_JOYPAD_SELECT,SDL_SCANCODE_BACKSPACE },
+    { "x_up",   "X Arriba",    RETRO_DEVICE_ID_JOYPAD_UP,    WSK_W },
+    { "x_down", "X Abajo",     RETRO_DEVICE_ID_JOYPAD_DOWN,  WSK_S },
+    { "x_left", "X Izquierda", RETRO_DEVICE_ID_JOYPAD_LEFT,  WSK_A },
+    { "x_right","X Derecha",   RETRO_DEVICE_ID_JOYPAD_RIGHT, WSK_D },
+    { "y_up",   "Y Arriba",    RETRO_DEVICE_ID_JOYPAD_L,     WSK_UP },
+    { "y_down", "Y Abajo",     RETRO_DEVICE_ID_JOYPAD_L2,    WSK_DOWN },
+    { "y_left", "Y Izquierda", RETRO_DEVICE_ID_JOYPAD_R,     WSK_LEFT },
+    { "y_right","Y Derecha",   RETRO_DEVICE_ID_JOYPAD_R2,    WSK_RIGHT },
+    { "a",      "Boton A",     RETRO_DEVICE_ID_JOYPAD_A,     WSK_X },
+    { "b",      "Boton B",     RETRO_DEVICE_ID_JOYPAD_B,     WSK_Z },
+    { "start",  "Start",       RETRO_DEVICE_ID_JOYPAD_START, WSK_RETURN },
+    { "select", "Select",      RETRO_DEVICE_ID_JOYPAD_SELECT,WSK_BACKSPACE },
 };
 
 struct SoundInfo { const char *key; const char *name; };
@@ -52,21 +52,14 @@ std::string Trim(const std::string &s) {
     return s.substr(a, b - a + 1);
 }
 
-// Un nombre de tecla se guarda como numero; se aceptan los nombres de SDL
-// (ej. SDLK_F1) y un valor numerico directo, para poder editar el INI a mano.
-SDL_Scancode ParseKey(const std::string &value) {
-    if (value.empty())
-        return SDL_SCANCODE_UNKNOWN;
-    if (value.find_first_not_of("0123456789") == std::string::npos)
-        return (SDL_Scancode)atoi(value.c_str());
-    SDL_Scancode sc = SDL_GetScancodeFromName(value.c_str());
-    return sc;
+// Un nombre de tecla se guarda como numero o con el nombre de SDL (ej. "F1");
+// keys.cpp mantiene la tabla, que es la misma que usaba SDL, de modo que los
+// INI ya escritos se siguen leyendo.
+WsKey ParseKey(const std::string &value) {
+    return WsKeyFromName(value.c_str());
 }
 
-std::string KeyName(SDL_Scancode sc) {
-    const char *name = SDL_GetScancodeName(sc);
-    return (name != nullptr && name[0] != '\0') ? name : "Desconocida";
-}
+std::string KeyName(WsKey key) { return WsKeyName(key); }
 
 bool ParseBool(const std::string &v, bool def) {
     if (v == "1" || v == "true" || v == "si" || v == "yes")
@@ -86,7 +79,7 @@ void Config::Reset() {
     rotate   = ROT_MANUAL;
     keymap   = KEYMAP_AUTO;
     mode_60hz = false;
-    key_rotate = SDL_SCANCODE_F1;
+    key_rotate = WSK_F1;
     for (int i = 0; i < SND_COUNT; ++i)
         sound[i] = true;
     for (int i = 0; i < WSB_COUNT; ++i)
@@ -136,6 +129,8 @@ void Config::Load(const std::string &path) {
     if (zoom > 4) zoom = 4;
     mode_60hz = ParseBool(get("video.mode_60hz", "0"), false);
     key_rotate = ParseKey(get("video.rotate_key", get("video.flip_key", "F1")));
+    if (key_rotate == WSK_UNKNOWN)
+        key_rotate = WSK_F1;
 
     rotate = ROT_MANUAL;
     std::string rot = get("video.rotate", "manual");
@@ -157,9 +152,9 @@ void Config::Load(const std::string &path) {
     for (int i = 0; i < WSB_COUNT; ++i) {
         char key[64];
         snprintf(key, sizeof(key), "input.%s", BUTTONS[i].key);
-        SDL_Scancode sc = ParseKey(get(key, ""));
-        if (sc != SDL_SCANCODE_UNKNOWN)
-            bind[i] = sc;
+        WsKey k = ParseKey(get(key, ""));
+        if (k != WSK_UNKNOWN)
+            bind[i] = k;
     }
 }
 
@@ -175,7 +170,7 @@ void Config::Save(const std::string &path) const {
     fprintf(f, "zoom = %d\n", zoom);
     fprintf(f, "mode_60hz = %d\n", mode_60hz ? 1 : 0);
     fprintf(f, "rotate = %s\n", RotationName(rotate));
-    fprintf(f, "rotate_key = %s\n\n", SDL_GetScancodeName(key_rotate));
+    fprintf(f, "rotate_key = %s\n\n", KeyName(key_rotate).c_str());
 
     fprintf(f, "[Sound]\n");
     fprintf(f, "master = %d\n", master ? 1 : 0);
@@ -227,4 +222,4 @@ const char *SoundItemName(int i) {
     return SOUNDS[i].name;
 }
 
-std::string KeyDisplayName(SDL_Scancode sc) { return KeyName(sc); }
+std::string KeyDisplayName(WsKey key) { return KeyName(key); }

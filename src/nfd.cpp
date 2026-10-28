@@ -87,8 +87,7 @@ bool HaveCommand(const char *name) {
 
 } // namespace
 
-std::string OpenFileDialog(SDL_Window *parent, const std::string &start_dir) {
-    (void)parent;   // el dialogo nativo no necesita la ventana propietaria
+std::string OpenFileDialog(const std::string &start_dir) {
 #if defined(_WIN32)
 
     // GetOpenFileNameW trabaja con una cadena mutable de tamano fijo.

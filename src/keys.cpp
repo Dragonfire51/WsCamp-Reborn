@@ -47,7 +47,7 @@ const KeyName KEY_NAMES[] = {
     { WSK_KP_1, "Kp 1" }, { WSK_KP_2, "Kp 2" }, { WSK_KP_3, "Kp 3" },
     { WSK_KP_4, "Kp 4" }, { WSK_KP_5, "Kp 5" }, { WSK_KP_6, "Kp 6" },
     { WSK_KP_7, "Kp 7" }, { WSK_KP_8, "Kp 8" }, { WSK_KP_9, "Kp 9" },
-    { WSK_KP_0, "Kp 0" },
+    { WSK_KP_0, "Kp 0" }, { WSK_KP_PERIOD, "Kp ." },
 
     { WSK_LCTRL, "Left Ctrl" }, { WSK_LSHIFT, "Left Shift" },
     { WSK_LALT, "Left Alt" }, { WSK_LGUI, "Left GUI" },

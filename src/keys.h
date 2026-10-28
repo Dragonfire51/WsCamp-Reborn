@@ -57,6 +57,7 @@ enum WsKey {
     WSK_KP_ENTER    = 88,
     WSK_KP_1 = 89, WSK_KP_2, WSK_KP_3, WSK_KP_4, WSK_KP_5,
     WSK_KP_6, WSK_KP_7, WSK_KP_8, WSK_KP_9, WSK_KP_0,
+    WSK_KP_PERIOD   = 99,
 
     WSK_LCTRL  = 224,
     WSK_LSHIFT = 225,

@@ -5,9 +5,9 @@
 // salir y despues de cada cambio hecho desde el menu.
 #pragma once
 
-#include <SDL.h>
-
 #include <string>
+
+#include "keys.h"
 
 // Botones mapeables. El indice es estable porque se guarda en el INI.
 enum WsButton {
@@ -63,9 +63,9 @@ struct Config {
     int          keymap   = KEYMAP_AUTO;
     bool         mode_60hz = false; // el nucleo baja de 75 a 60 Hz
     bool         sound[SND_COUNT];
-    SDL_Scancode bind[WSB_COUNT];
+    WsKey        bind[WSB_COUNT];
     // F1: alterna entre horizontal y vertical, como en la consola real.
-    SDL_Scancode key_rotate = SDL_SCANCODE_F1;
+    WsKey        key_rotate = WSK_F1;
 
     Config();
 
@@ -86,4 +86,4 @@ unsigned    WsButtonRetroId(int b);
 const char *SoundItemName(int i);
 const char *RotationName(int r);
 const char *KeymapName(int m);
-std::string KeyDisplayName(SDL_Scancode sc);
+std::string KeyDisplayName(WsKey key);

@@ -1,12 +1,14 @@
-// main.cpp -- WsCampReborn: frontend libretro portable (SDL2).
+// main.cpp -- WsCampReborn: frontend libretro para WonderSwan.
 //
 // Carga el nucleo beetle-wswan (mednafen_wswan_libretro) en tiempo de ejecucion
 // y ofrece 10 ranuras de Save/Load State, menu de Opciones (video, sonido y
 // controles) y guardado de la configuracion en WsCampReborn.ini.
 //
+// La interfaz no habla con SDL ni con Win32: usa la capa de plataforma
+// (platform.h). En Windows manda el backend nativo, que dibuja el texto con
+// GDI y pone el menu del sistema; en Linux y macOS se usa SDL2.
+//
 // Compilar con: make        (ver Makefile)
-
-#include <SDL.h>
 
 #include <algorithm>
 #include <cctype>
@@ -21,9 +23,10 @@
 #include <vector>
 
 #include "config.h"
-#include "font5x7.h"
 #include "menu.h"
+#include "menu_model.h"
 #include "nfd.h"
+#include "platform.h"
 #include "version.h"
 #include "video.h"
 #include "ws_core.h"
@@ -32,16 +35,13 @@
 // Estado global
 // ---------------------------------------------------------------------------
 static WsCore            g_core;
-static SDL_Window       *g_window      = nullptr;
-static SDL_Renderer     *g_renderer    = nullptr;
-static SDL_Texture      *g_texture     = nullptr;
 static bool              g_running     = true;
 static bool              g_game_loaded = false;
 static bool              g_paused      = false;
 
 // Video
 static enum retro_pixel_format g_pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
-static std::vector<uint32_t> g_display;          // ARGB8888 listo para SDL
+static std::vector<uint32_t> g_display;          // ARGB8888 listo para dibujar
 static unsigned          g_display_w = 0, g_display_h = 0;
 static bool              g_have_frame = false;
 
@@ -56,7 +56,6 @@ static std::string       g_save_dir;
 static std::string       g_assets_dir;
 
 // Audio
-static SDL_AudioDeviceID g_audio_dev = 0;
 static bool              g_audio_on  = false;
 
 // Interfaz
@@ -66,7 +65,7 @@ static int               g_submenu     = SUB_NONE;
 static int               g_menu_sel    = 0;      // entrada con el foco en el menu
 static int               g_submenu_sel = 0;      // entrada con el foco en el submenu
 static std::string       g_status;               // mensaje temporal
-static Uint32            g_status_until = 0;
+static uint64_t          g_status_until = 0;
 
 // Mapeo de teclas
 static int               g_capture_button = -1;  // boton que espera una tecla
@@ -75,25 +74,12 @@ static int               g_capture_button = -1;  // boton que espera una tecla
 // cuando el nucleo cambia de orientacion (juegos verticales).
 static unsigned          g_sized_base_w = 0, g_sized_base_h = 0;
 
-// Se pone a true cuando la ventana cambia de tamano, para forzar un redibujado
-// completo aunque la emulacion este en pausa o en un menu.
-static bool              g_window_dirty = false;
+// El backend nativo de Windows pone su propia barra de menus.
+static bool              g_native_menu = false;
 
 // ---------------------------------------------------------------------------
 // Utilidades
 // ---------------------------------------------------------------------------
-static std::string ExeDir() {
-    char *base = SDL_GetBasePath();
-    if (base == nullptr)
-        return std::string(".");
-    std::string dir(base);
-    SDL_free(base);
-    // Quita el separador final para poder concatenar.
-    while (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\'))
-        dir.pop_back();
-    return dir;
-}
-
 static std::string JoinPath(const std::string &dir, const std::string &name) {
     if (dir.empty())
         return name;
@@ -122,8 +108,8 @@ static std::string BaseName(const std::string &path) {
 
 static void SetStatus(const std::string &msg) {
     g_status = msg;
-    g_status_until = SDL_GetTicks() + 2500;
-    SDL_Log("%s", msg.c_str());
+    g_status_until = WsTicks() + 2500;
+    WsLog("%s", msg.c_str());
 }
 
 static void LogPrintf(enum retro_log_level level, const char *fmt, ...) {
@@ -140,101 +126,33 @@ static void LogPrintf(enum retro_log_level level, const char *fmt, ...) {
     case RETRO_LOG_ERROR: tag = "ERROR"; break;
     default: break;
     }
-    SDL_Log("[%s] %s", tag, buf);
+    WsLog("[%s] %s", tag, buf);
 }
 
 // ---------------------------------------------------------------------------
-// Dibujo de texto (fuente integrada)
-// ---------------------------------------------------------------------------
-static const FontGlyph *FindGlyph(char c) {
-    if (c >= 'a' && c <= 'z')
-        c = (char)(c - 'a' + 'A');
-    for (const FontGlyph &g : FONT_GLYPHS)
-        if (g.ch == c)
-            return &g;
-    return nullptr;
-}
-
-static int TextHeight(int scale) { return FONT_GLYPH_H * scale; }
-
-static int TextWidth(const std::string &text, int scale) {
-    return (int)text.size() * FONT_ADVANCE * scale;
-}
-
-static void DrawText(SDL_Renderer *r, int x, int y, const std::string &text,
-                     int scale, SDL_Color color) {
-    SDL_SetRenderDrawColor(r, color.r, color.g, color.b, color.a);
-    int cx = x;
-    for (char c : text) {
-        const FontGlyph *g = FindGlyph(c);
-        if (g != nullptr) {
-            for (int row = 0; row < FONT_GLYPH_H; ++row) {
-                const char *bits = g->rows[row];
-                for (int col = 0; col < FONT_GLYPH_W; ++col) {
-                    if (bits[col] != '#')
-                        continue;
-                    SDL_Rect px = { cx + col * scale, y + row * scale, scale, scale };
-                    SDL_RenderFillRect(r, &px);
-                }
-            }
-        }
-        cx += FONT_ADVANCE * scale;
-    }
-}
-
-static void FillRect(SDL_Renderer *r, int x, int y, int w, int h, SDL_Color c) {
-    SDL_SetRenderDrawColor(r, c.r, c.g, c.b, c.a);
-    SDL_Rect rc = { x, y, w, h };
-    SDL_RenderFillRect(r, &rc);
-}
-
-// ---------------------------------------------------------------------------
-// Audio (SDL_QueueAudio)
+// Audio
 // ---------------------------------------------------------------------------
 static void CloseAudio() {
-    if (g_audio_dev != 0) {
-        SDL_CloseAudioDevice(g_audio_dev);
-        g_audio_dev = 0;
-    }
+    WsCloseAudio();
     g_audio_on = false;
 }
 
-// El silencio general se aplica pausando el dispositivo: asi el corte es
+// El silencio general se aplica pausando la reproduccion: asi el corte es
 // inmediato y no depende de lo que quede en la cola.
 static void ApplyMasterMute() {
-    if (g_audio_dev != 0)
-        SDL_PauseAudioDevice(g_audio_dev, g_cfg.master ? 0 : 1);
+    WsSetAudioPaused(!g_cfg.master);
 }
 
 static void OpenAudio(double sample_rate) {
     CloseAudio();
-
-    if (sample_rate <= 0.0)
-        sample_rate = 44100.0;
-
-    SDL_AudioSpec want = {};
-    want.freq     = (int)(sample_rate + 0.5);
-    want.format   = AUDIO_S16SYS;
-    want.channels = 2;
-    want.samples  = 1024;
-
-    SDL_AudioSpec have = {};
-    g_audio_dev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
-    if (g_audio_dev == 0) {
-        SDL_Log("SDL_OpenAudioDevice fallo: %s; se continua sin audio", SDL_GetError());
-        return;
-    }
-
-    g_audio_on = true;
+    g_audio_on = WsOpenAudio((int)(sample_rate + 0.5));
     ApplyMasterMute();
 }
 
 static void PushAudio(const int16_t *data, size_t frames) {
     if (!g_audio_on || !g_cfg.master || data == nullptr || frames == 0)
         return;
-    // Si el buffer del dispositivo se llena, SDL descarta el exceso; es
-    // preferible a bloquear el hilo de emulacion.
-    SDL_QueueAudio(g_audio_dev, data, (Uint32)(frames * 2 * sizeof(int16_t)));
+    WsQueueAudio(data, frames);
 }
 
 // ---------------------------------------------------------------------------
@@ -261,21 +179,17 @@ static void AudioSample(int16_t left, int16_t right) {
 }
 
 static void InputPoll(void) {
-    // La entrada se lee de SDL_GetKeyboardState en InputState.
+    // La entrada se consulta en InputState.
 }
 
 static int16_t InputState(unsigned port, unsigned device, unsigned index, unsigned id) {
     if (port != 0 || index != 0 || device != RETRO_DEVICE_JOYPAD)
         return 0;
 
-    const Uint8 *keys = SDL_GetKeyboardState(nullptr);
-    if (keys == nullptr)
-        return 0;
-
     for (int b = 0; b < WSB_COUNT; ++b) {
         if (WsButtonRetroId(b) == id) {
-            SDL_Scancode sc = g_cfg.bind[b];
-            if (sc != SDL_SCANCODE_UNKNOWN && keys[sc])
+            WsKey key = g_cfg.bind[b];
+            if (key != WSK_UNKNOWN && WsKeyDown(key))
                 return 1;
             return 0;
         }
@@ -650,58 +564,58 @@ static void OpenBuiltinBrowser() {
 static void ShowAbout() {
     bool open = true;
     while (open && g_running) {
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT) {
+        WsEvent ev;
+        while (WsPollEvent(ev)) {
+            if (ev.type == WSE_QUIT) {
                 g_running = false;
                 open = false;
-            } else if (ev.type == SDL_KEYDOWN || ev.type == SDL_MOUSEBUTTONDOWN)
+            } else if (ev.type == WSE_KEYDOWN || ev.type == WSE_MOUSEDOWN) {
                 open = false;
+            }
         }
 
         int ww = 0, wh = 0;
-        SDL_GetWindowSize(g_window, &ww, &wh);
+        WsGetSize(ww, wh);
 
         const int box_w = 460;
         const int box_h = 220;
         const int bx = (ww - box_w) / 2;
         const int by = (wh - box_h) / 2;
 
-        SDL_SetRenderDrawColor(g_renderer, 20, 20, 24, 255);
-        SDL_RenderClear(g_renderer);
+        WsBeginFrame(ww, wh);
+        WsFillRect(0, 0, ww, wh, WsColor{ 20, 20, 24, 255 });
+        WsFillRect(bx, by, box_w, box_h, WsColor{ 40, 40, 48, 255 });
+        WsFillRect(bx, by, box_w, 2, WsColor{ 200, 200, 210, 255 });
+        WsFillRect(bx, by + box_h - 2, box_w, 2, WsColor{ 200, 200, 210, 255 });
+        WsFillRect(bx, by, 2, box_h, WsColor{ 200, 200, 210, 255 });
+        WsFillRect(bx + box_w - 2, by, 2, box_h, WsColor{ 200, 200, 210, 255 });
 
-        FillRect(g_renderer, bx, by, box_w, box_h, SDL_Color{ 40, 40, 48, 255 });
-        FillRect(g_renderer, bx, by, box_w, 2, SDL_Color{ 200, 200, 210, 255 });
-        FillRect(g_renderer, bx, by + box_h - 2, box_w, 2, SDL_Color{ 200, 200, 210, 255 });
-        FillRect(g_renderer, bx, by, 2, box_h, SDL_Color{ 200, 200, 210, 255 });
-        FillRect(g_renderer, bx + box_w - 2, by, 2, box_h, SDL_Color{ 200, 200, 210, 255 });
-
-        SDL_Color title = { 255, 220, 120, 255 };
-        SDL_Color body  = { 230, 230, 235, 255 };
-        SDL_Color dim   = { 170, 170, 180, 255 };
+        WsColor title = { 255, 220, 120, 255 };
+        WsColor body  = { 230, 230, 235, 255 };
+        WsColor dim   = { 170, 170, 180, 255 };
 
         int ty = by + 22;
-        DrawText(g_renderer, bx + 24, ty, WSCAMP_VERSION_FULL, UI_TEXT_SCALE, title);
-        ty += TextHeight(UI_TEXT_SCALE) + 14;
+        WsDrawText(bx + 24, ty, WSCAMP_VERSION_FULL, UI_TEXT_SCALE, title);
+        ty += WsTextHeight(UI_TEXT_SCALE) + 14;
 
-        DrawText(g_renderer, bx + 24, ty, "Version: " WSCAMP_VERSION_STRING,
-                 UI_TEXT_SCALE, body);
-        ty += TextHeight(UI_TEXT_SCALE) + 10;
+        WsDrawText(bx + 24, ty, "Version: " WSCAMP_VERSION_STRING,
+                   UI_TEXT_SCALE, body);
+        ty += WsTextHeight(UI_TEXT_SCALE) + 10;
 
-        DrawText(g_renderer, bx + 24, ty, "Emulador WonderSwan / WonderSwan Color",
-                 UI_TEXT_SCALE, body);
-        ty += TextHeight(UI_TEXT_SCALE) + 8;
-        DrawText(g_renderer, bx + 24, ty, "Nucleo: beetle-wswan (mednafen/wswan)",
-                 UI_TEXT_SCALE, dim);
-        ty += TextHeight(UI_TEXT_SCALE) + 8;
-        DrawText(g_renderer, bx + 24, ty, "Frontend libretro sobre SDL2",
-                 UI_TEXT_SCALE, dim);
-        ty += TextHeight(UI_TEXT_SCALE) + 18;
-        DrawText(g_renderer, bx + 24, ty, "Pulsa cualquier tecla para cerrar",
-                 UI_TEXT_SCALE, dim);
+        WsDrawText(bx + 24, ty, "Emulador WonderSwan / WonderSwan Color",
+                   UI_TEXT_SCALE, body);
+        ty += WsTextHeight(UI_TEXT_SCALE) + 8;
+        WsDrawText(bx + 24, ty, "Nucleo: beetle-wswan (mednafen/wswan)",
+                   UI_TEXT_SCALE, dim);
+        ty += WsTextHeight(UI_TEXT_SCALE) + 8;
+        WsDrawText(bx + 24, ty, "Interfaz nativa: GDI en Windows, SDL2 en el resto",
+                   UI_TEXT_SCALE, dim);
+        ty += WsTextHeight(UI_TEXT_SCALE) + 18;
+        WsDrawText(bx + 24, ty, "Pulsa cualquier tecla para cerrar",
+                   UI_TEXT_SCALE, dim);
 
-        SDL_RenderPresent(g_renderer);
-        SDL_Delay(16);
+        WsEndFrame();
+        WsDelay(16);
     }
 }
 
@@ -747,17 +661,16 @@ static bool StartCore() {
     if (dll.empty()) {
         SetStatus(std::string("No se encontro el nucleo ") + CoreLibraryName() +
                   " junto al ejecutable ni en lib/");
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, WSCAMP_APP_NAME,
+        WsMessageBox(WSCAMP_APP_NAME,
             "No se encontro el nucleo libretro.\n\n"
             "Copia mednafen_wswan_libretro junto al ejecutable o en la "
             "carpeta lib/.\n\n"
-            "Descargalo como build \"beetle-wswan-libretro\".", g_window);
+            "Descargalo como build \"beetle-wswan-libretro\".");
         return false;
     }
 
     if (!g_core.Load(dll)) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, WSCAMP_APP_NAME,
-                                 g_core.last_error().c_str(), g_window);
+        WsMessageBox(WSCAMP_APP_NAME, g_core.last_error().c_str());
         return false;
     }
 
@@ -765,8 +678,7 @@ static bool StartCore() {
 
     unsigned api = g_core.retro_api_version();
     if (api != RETRO_API_VERSION) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, WSCAMP_APP_NAME,
-                                 "Version de API libretro incompatible.", g_window);
+        WsMessageBox(WSCAMP_APP_NAME, "Version de API libretro incompatible.");
         g_core.Unload();
         return false;
     }
@@ -796,15 +708,10 @@ static void StopCore() {
 // ---------------------------------------------------------------------------
 // Interfaz: barra de menus
 // ---------------------------------------------------------------------------
-static const char *MENU_TITLES[MENU_COUNT] = {
-    "Archivo", "Emulacion", "Estado", "Opciones", "Ayuda"
-};
-
-// Ancho de la barra: se calcula para que las etiquetas no se solapen.
 static int MenuBarItemWidth() {
     int widest = 0;
     for (int i = 0; i < MENU_COUNT; ++i) {
-        int w = TextWidth(MENU_TITLES[i], UI_TEXT_SCALE);
+        int w = WsTextWidth(MenuTitle(i), UI_TEXT_SCALE);
         if (w > widest)
             widest = w;
     }
@@ -815,134 +722,27 @@ static int MenuBarItemX(int index) {
     return 6 + index * MenuBarItemWidth();
 }
 
-struct MenuItem {
-    std::string label;
-    int         command;
-    bool        separator;
-    bool        checked;
-    bool        has_submenu;
-};
+// Declarado adelante: la navegacion del menu lo usa antes de su definicion.
+void ExecuteCommand(int cmd);
 
-static MenuItem Item(const std::string &label, int command) {
-    MenuItem it;
-    it.label       = label;
-    it.command     = command;
-    it.separator   = false;
-    it.checked     = false;
-    it.has_submenu = false;
-    return it;
-}
-
-static MenuItem Checked(const std::string &label, int command, bool on) {
-    MenuItem it = Item(label, command);
-    it.checked  = on;
-    return it;
-}
-
-static MenuItem Separator() {
-    MenuItem it = Item("", 0);
-    it.separator = true;
-    return it;
-}
-
-static MenuItem SubmenuItem(const std::string &label, int submenu) {
-    MenuItem it = Item(label, submenu);
-    it.has_submenu = true;
-    return it;
-}
-
-static std::vector<MenuItem> MenuItems(int menu) {
-    std::vector<MenuItem> items;
-    switch (menu) {
-    case MENU_FILE:
-        items.push_back(Item("Abrir ROM...  (Ctrl+O)", CMD_FILE_OPEN));
-        items.push_back(Separator());
-        items.push_back(Item("Salir", CMD_FILE_EXIT));
-        break;
-    case MENU_EMU:
-        items.push_back(Item("Reiniciar", CMD_EMU_RESET));
-        items.push_back(Checked("Pausa  (Espacio)", CMD_EMU_PAUSE, g_paused));
-        break;
-    case MENU_STATE:
-        for (int i = 0; i < WSCAMP_STATE_SLOTS; ++i) {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "Guardar estado %d", i);
-            items.push_back(Item(buf, CMD_SAVE_STATE_BASE + i));
-        }
-        items.push_back(Separator());
-        for (int i = 0; i < WSCAMP_STATE_SLOTS; ++i) {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "Cargar estado %d", i);
-            items.push_back(Item(buf, CMD_LOAD_STATE_BASE + i));
-        }
-        break;
-    case MENU_OPTIONS:
-        items.push_back(SubmenuItem("Video", SUB_VIDEO));
-        items.push_back(SubmenuItem("Sonido", SUB_SOUND));
-        items.push_back(SubmenuItem("Controles", SUB_INPUT));
-        break;
-    case MENU_HELP:
-        items.push_back(Item("Acerca de " WSCAMP_APP_NAME "...", CMD_HELP_ABOUT));
-        break;
-    default: break;
-    }
-    return items;
-}
-
-static std::vector<MenuItem> SubMenuItems(int submenu) {
-    std::vector<MenuItem> items;
-    switch (submenu) {
-    case SUB_VIDEO:
-        items.push_back(Checked("Zoom 1x", CMD_VIDEO_ZOOM_1, g_cfg.zoom == 1));
-        items.push_back(Checked("Zoom 2x", CMD_VIDEO_ZOOM_2, g_cfg.zoom == 2));
-        items.push_back(Checked("Zoom 3x", CMD_VIDEO_ZOOM_3, g_cfg.zoom == 3));
-        items.push_back(Checked("Zoom 4x", CMD_VIDEO_ZOOM_4, g_cfg.zoom == 4));
-        items.push_back(Separator());
-        items.push_back(Item("Alternar horizontal / vertical  (F1)", CMD_VIDEO_ROT_TOGGLE));
-        items.push_back(Checked("Orientacion: automatica (Select)", CMD_VIDEO_ROT_BASE + ROT_MANUAL,
-                                g_cfg.rotate == ROT_MANUAL));
-        items.push_back(Checked("Orientacion: vertical", CMD_VIDEO_ROT_BASE + ROT_PORTRAIT,
-                                g_cfg.rotate == ROT_PORTRAIT));
-        items.push_back(Checked("Orientacion: horizontal", CMD_VIDEO_ROT_BASE + ROT_LANDSCAPE,
-                                g_cfg.rotate == ROT_LANDSCAPE));
-        items.push_back(Separator());
-        items.push_back(Checked("Modo 60 Hz", CMD_VIDEO_60HZ, g_cfg.mode_60hz));
-        break;
-    case SUB_SOUND:
-        items.push_back(Checked("Silencio general", CMD_SOUND_MASTER, !g_cfg.master));
-        items.push_back(Separator());
-        for (int i = 0; i < SND_COUNT; ++i)
-            items.push_back(Checked(SoundItemName(i), CMD_SOUND_CH_BASE + i,
-                                    g_cfg.sound[i]));
-        break;
-    case SUB_INPUT: {
-        for (int b = 0; b < WSB_COUNT; ++b) {
-            std::string label = std::string(WsButtonName(b)) + ": " +
-                                KeyDisplayName(g_cfg.bind[b]);
-            items.push_back(Item(label, CMD_INPUT_BIND_BASE + b));
-        }
-        items.push_back(Separator());
-        items.push_back(Checked("Cruceta al rotar: automatica",
-                                CMD_INPUT_KEYMAP_BASE + KEYMAP_AUTO,
-                                g_cfg.keymap == KEYMAP_AUTO));
-        items.push_back(Checked("Cruceta al rotar: solo horizontal",
-                                CMD_INPUT_KEYMAP_BASE + KEYMAP_LANDSCAPE,
-                                g_cfg.keymap == KEYMAP_LANDSCAPE));
-        items.push_back(Checked("Cruceta al rotar: solo vertical",
-                                CMD_INPUT_KEYMAP_BASE + KEYMAP_PORTRAIT,
-                                g_cfg.keymap == KEYMAP_PORTRAIT));
-        items.push_back(Separator());
-        items.push_back(Item("Restaurar valores por defecto", CMD_INPUT_RESET));
-        break;
-    }
-    default: break;
-    }
-    return items;
+// ---------------------------------------------------------------------------
+// Estado del menu para el modelo compartido
+// ---------------------------------------------------------------------------
+MenuState MenuStateForUi() {
+    MenuState st;
+    st.zoom      = g_cfg.zoom;
+    st.paused    = g_paused;
+    st.mode_60hz = g_cfg.mode_60hz;
+    st.rotate    = g_cfg.rotate;
+    st.keymap    = g_cfg.keymap;
+    st.master    = g_cfg.master;
+    for (int i = 0; i < SND_COUNT; ++i)
+        st.sound[i] = g_cfg.sound[i];
+    FillBindLabels(st);
+    return st;
 }
 
 static void UpdateWindowTitle() {
-    if (g_window == nullptr)
-        return;
     std::string title = std::string(WSCAMP_APP_NAME) + " " + WSCAMP_VERSION_STRING;
     if (g_game_loaded)
         title += " - " + BaseName(g_rom_path);
@@ -950,7 +750,7 @@ static void UpdateWindowTitle() {
         title += " - sin ROM";
     if (g_paused)
         title += " [PAUSA]";
-    SDL_SetWindowTitle(g_window, title.c_str());
+    WsSetTitle(title.c_str());
 }
 
 // Tamano base del juego segun la orientacion actual (224x144 o 144x224).
@@ -964,18 +764,14 @@ static void BaseGameSize(unsigned &w, unsigned &h) {
 // ventana es la que fijo el zoom. Antes se forzaba siempre y por eso al
 // maximizar y restaurar saltaba a un tamano equivocado.
 static void ApplyWindowSize() {
-    if (g_window == nullptr)
-        return;
-    if ((SDL_GetWindowFlags(g_window) &
-         (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN |
-          SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0)
+    if (WsIsMaximized())
         return;
 
     unsigned base_w = 0, base_h = 0;
     BaseGameSize(base_w, base_h);
-    SDL_SetWindowSize(g_window,
-                      (int)base_w * g_cfg.zoom,
-                      (int)base_h * g_cfg.zoom + MENUBAR_H);
+    // El backend nativo ajusta el marco y la barra de menu el solo.
+    const int extra = g_native_menu ? 0 : MENUBAR_H;
+    WsSetSize((int)base_w * g_cfg.zoom, (int)base_h * g_cfg.zoom + extra);
 }
 
 static void SaveConfig() {
@@ -1010,80 +806,54 @@ static void ToggleOrientation() {
                                            : "Pantalla horizontal (224x144)");
 }
 
-static void BeginFrame(int, int) {
-    SDL_SetRenderTarget(g_renderer, nullptr);
-}
-
-static void EndFrame() {
-    SDL_RenderPresent(g_renderer);
-}
-
-static void ExecuteCommand(int cmd);
-
 // ---------------------------------------------------------------------------
 // Dibujo de la interfaz
 // ---------------------------------------------------------------------------
 static void RenderEmulator(int ww, int wh) {
-    FillRect(g_renderer, 0, 0, ww, wh, SDL_Color{ 0, 0, 0, 255 });
+    WsFillRect(0, 0, ww, wh, WsColor{ 0, 0, 0, 255 });
 
-    int view_h = wh - MENUBAR_H;
+    // Con menu nativo la barra la pinta el sistema fuera del area de cliente,
+    // asi que no hay que reservarle espacio dentro.
+    const int bar_h = g_native_menu ? 0 : MENUBAR_H;
+    int view_h = wh - bar_h;
     if (g_have_frame && g_display_w > 0 && g_display_h > 0 && view_h > 0) {
-        int tex_w = 0, tex_h = 0;
-        if (g_texture != nullptr)
-            SDL_QueryTexture(g_texture, nullptr, nullptr, &tex_w, &tex_h);
-
-        if (g_texture == nullptr || tex_w != (int)g_display_w || tex_h != (int)g_display_h) {
-            if (g_texture != nullptr)
-                SDL_DestroyTexture(g_texture);
-            g_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888,
-                                          SDL_TEXTUREACCESS_STREAMING,
-                                          (int)g_display_w, (int)g_display_h);
-            if (g_texture != nullptr)
-                SDL_SetTextureBlendMode(g_texture, SDL_BLENDMODE_NONE);
-        }
-
-        if (g_texture != nullptr) {
-            SDL_UpdateTexture(g_texture, nullptr, g_display.data(),
-                              (int)g_display_w * 4);
-
-            // La imagen llena el area de vision manteniendo su aspecto. El
-            // zoom solo decide el tamano inicial de la ventana.
-            int dx = 0, dy = 0, dw = 0, dh = 0;
-            FitGameRect(ww, view_h, (int)g_display_w, (int)g_display_h,
-                        &dx, &dy, &dw, &dh);
-            dy += MENUBAR_H;
-
-            SDL_Rect dst = { dx, dy, dw, dh };
-            SDL_RenderCopy(g_renderer, g_texture, nullptr, &dst);
-        }
+        // La imagen llena el area de vision manteniendo su aspecto. El zoom
+        // solo decide el tamano inicial de la ventana.
+        int dx = 0, dy = 0, dw = 0, dh = 0;
+        FitGameRect(ww, view_h, (int)g_display_w, (int)g_display_h,
+                    &dx, &dy, &dw, &dh);
+        dy += bar_h;
+        WsDrawGame(g_display.data(), (int)g_display_w, (int)g_display_h,
+                   dx, dy, dw, dh);
     }
 
-    // Barra de menus
-    FillRect(g_renderer, 0, 0, ww, MENUBAR_H, SDL_Color{ 55, 55, 65, 255 });
-    SDL_Color fg = { 230, 230, 235, 255 };
-    int item_w = MenuBarItemWidth();
-    for (int i = 0; i < MENU_COUNT; ++i) {
-        int x = MenuBarItemX(i);
-        bool hot = (g_menu_open == i);
-        if (hot)
-            FillRect(g_renderer, x - 4, 2, item_w - 4, MENUBAR_H - 4,
-                     SDL_Color{ 90, 90, 105, 255 });
-        DrawText(g_renderer, x, 7, MENU_TITLES[i], UI_TEXT_SCALE, fg);
+    // Barra de menus propia (solo donde el sistema no la pone).
+    if (!g_native_menu) {
+        WsFillRect(0, 0, ww, MENUBAR_H, WsColor{ 55, 55, 65, 255 });
+        WsColor fg = { 230, 230, 235, 255 };
+        int item_w = MenuBarItemWidth();
+        for (int i = 0; i < MENU_COUNT; ++i) {
+            int x = MenuBarItemX(i);
+            if (g_menu_open == i)
+                WsFillRect(x - 4, 2, item_w - 4, MENUBAR_H - 4,
+                           WsColor{ 90, 90, 105, 255 });
+            WsDrawText(x, 7, MenuTitle(i), UI_TEXT_SCALE, fg);
+        }
     }
 
     // Mensaje de estado
-    if (!g_status.empty() && SDL_GetTicks() < g_status_until) {
-        FillRect(g_renderer, 0, wh - 24, ww, 24, SDL_Color{ 30, 30, 36, 220 });
-        DrawText(g_renderer, 8, wh - 20, g_status, UI_TEXT_SCALE,
-                 SDL_Color{ 200, 220, 255, 255 });
+    if (!g_status.empty() && WsTicks() < g_status_until) {
+        WsFillRect(0, wh - 24, ww, 24, WsColor{ 30, 30, 36, 220 });
+        WsDrawText(8, wh - 20, g_status, UI_TEXT_SCALE,
+                   WsColor{ 200, 220, 255, 255 });
     }
 }
 
 // Ancho que necesita una lista desplegable.
-static int ListWidth(const std::vector<MenuItem> &items) {
+static int ListWidth(const std::vector<MenuEntry> &items) {
     int w = MENU_ITEM_W;
-    for (const MenuItem &it : items) {
-        int lw = TextWidth(it.label, UI_TEXT_SCALE) + 46;
+    for (const MenuEntry &it : items) {
+        int lw = WsTextWidth(it.label, UI_TEXT_SCALE) + 46;
         if (lw > w)
             w = lw;
     }
@@ -1091,35 +861,35 @@ static int ListWidth(const std::vector<MenuItem> &items) {
 }
 
 // Dibuja una lista desplegable y devuelve su altura total.
-static int RenderList(int x, int y, const std::vector<MenuItem> &items, int focus) {
+static int RenderList(int x, int y, const std::vector<MenuEntry> &items, int focus) {
     int w = ListWidth(items);
     int h = (int)items.size() * MENU_ITEM_H + 4;
-    FillRect(g_renderer, x, y, w, h, SDL_Color{ 45, 45, 55, 255 });
-    SDL_Color border = { 140, 140, 155, 255 };
-    FillRect(g_renderer, x, y, w, 1, border);
-    FillRect(g_renderer, x, y, 1, h, border);
-    FillRect(g_renderer, x + w - 1, y, 1, h, border);
-    FillRect(g_renderer, x, y + h - 1, w, 1, border);
+    WsFillRect(x, y, w, h, WsColor{ 45, 45, 55, 255 });
+    WsColor border = { 140, 140, 155, 255 };
+    WsFillRect(x, y, w, 1, border);
+    WsFillRect(x, y, 1, h, border);
+    WsFillRect(x + w - 1, y, 1, h, border);
+    WsFillRect(x, y + h - 1, w, 1, border);
 
     int my = y + 2;
     for (size_t i = 0; i < items.size(); ++i) {
-        const MenuItem &it = items[i];
+        const MenuEntry &it = items[i];
         if (focus >= 0 && (int)i == focus)
-            FillRect(g_renderer, x + 1, my, w - 2, MENU_ITEM_H,
-                     SDL_Color{ 80, 80, 100, 255 });
+            WsFillRect(x + 1, my, w - 2, MENU_ITEM_H,
+                       WsColor{ 80, 80, 100, 255 });
 
         if (it.separator) {
-            FillRect(g_renderer, x + 4, my + MENU_ITEM_H / 2, w - 8, 1,
-                     SDL_Color{ 100, 100, 115, 255 });
+            WsFillRect(x + 4, my + MENU_ITEM_H / 2, w - 8, 1,
+                       WsColor{ 100, 100, 115, 255 });
         } else {
-            SDL_Color c = { 230, 230, 235, 255 };
             if (it.checked)
-                DrawText(g_renderer, x + 6, my + 4, ">", UI_TEXT_SCALE,
-                         SDL_Color{ 150, 230, 150, 255 });
-            DrawText(g_renderer, x + 22, my + 4, it.label, UI_TEXT_SCALE, c);
-            if (it.has_submenu)
-                DrawText(g_renderer, x + w - 14, my + 4, ">", UI_TEXT_SCALE,
-                         SDL_Color{ 200, 200, 210, 255 });
+                WsDrawText(x + 6, my + 4, ">", UI_TEXT_SCALE,
+                           WsColor{ 150, 230, 150, 255 });
+            WsDrawText(x + 22, my + 4, it.label, UI_TEXT_SCALE,
+                       WsColor{ 230, 230, 235, 255 });
+            if (it.submenu != SUB_NONE)
+                WsDrawText(x + w - 14, my + 4, ">", UI_TEXT_SCALE,
+                           WsColor{ 200, 200, 210, 255 });
         }
         my += MENU_ITEM_H;
     }
@@ -1127,27 +897,28 @@ static int RenderList(int x, int y, const std::vector<MenuItem> &items, int focu
 }
 
 static void RenderMenuDropdown() {
-    if (g_menu_open < 0)
+    if (g_native_menu || g_menu_open < 0)
         return;
 
-    std::vector<MenuItem> items = MenuItems(g_menu_open);
+    MenuState st = MenuStateForUi();
+    std::vector<MenuEntry> items = BuildTopMenu(g_menu_open, st);
     int x = MenuBarItemX(g_menu_open) - 4;
     int y = MENUBAR_H;
     int parent_w = ListWidth(items);
     RenderList(x, y, items, g_submenu == SUB_NONE ? g_menu_sel : -1);
 
     if (g_submenu != SUB_NONE) {
-        std::vector<MenuItem> sub = SubMenuItems(g_submenu);
+        std::vector<MenuEntry> sub = BuildSubMenu(g_submenu, st);
         int sy = y + 2 + g_menu_sel * MENU_ITEM_H;
         RenderList(x + parent_w, sy, sub, g_submenu_sel);
     }
 }
 
 static void RenderBrowser(int ww, int wh) {
-    FillRect(g_renderer, 0, 0, ww, wh, SDL_Color{ 18, 18, 22, 255 });
+    WsFillRect(0, 0, ww, wh, WsColor{ 18, 18, 22, 255 });
 
-    DrawText(g_renderer, 12, 12, "Abrir ROM - " + g_browse_dir, UI_TEXT_SCALE,
-             SDL_Color{ 255, 220, 120, 255 });
+    WsDrawText(12, 12, "Abrir ROM - " + g_browse_dir, UI_TEXT_SCALE,
+               WsColor{ 255, 220, 120, 255 });
 
     int y = 48;
     for (size_t i = 0; i < g_browse_entries.size(); ++i) {
@@ -1155,28 +926,30 @@ static void RenderBrowser(int ww, int wh) {
             break;
         bool sel = ((int)i == g_browse_sel);
         if (sel)
-            FillRect(g_renderer, 8, y - 3, ww - 16, MENU_ITEM_H + 4,
-                     SDL_Color{ 70, 70, 90, 255 });
+            WsFillRect(8, y - 3, ww - 16, MENU_ITEM_H + 4,
+                       WsColor{ 70, 70, 90, 255 });
 
         std::string label = g_browse_entries[i].name;
         if (g_browse_entries[i].is_dir)
             label = "[DIR] " + label;
-        DrawText(g_renderer, 16, y, label, UI_TEXT_SCALE,
-                 sel ? SDL_Color{ 255, 255, 255, 255 } : SDL_Color{ 210, 210, 220, 255 });
+        WsDrawText(16, y, label, UI_TEXT_SCALE,
+                   sel ? WsColor{ 255, 255, 255, 255 }
+                       : WsColor{ 210, 210, 220, 255 });
         y += MENU_ITEM_H + 4;
     }
 
-    DrawText(g_renderer, 12, wh - 26, "Enter: abrir   Flechas: mover   Esc: cancelar",
-             UI_TEXT_SCALE, SDL_Color{ 160, 160, 175, 255 });
+    WsDrawText(12, wh - 26, "Enter: abrir   Flechas: mover   Esc: cancelar",
+               UI_TEXT_SCALE, WsColor{ 160, 160, 175, 255 });
 }
 
 // ---------------------------------------------------------------------------
 // Navegacion del menu
 // ---------------------------------------------------------------------------
 static void MoveMenuSelection(int delta) {
+    MenuState st = MenuStateForUi();
     bool in_sub = (g_submenu != SUB_NONE);
-    std::vector<MenuItem> items = in_sub ? SubMenuItems(g_submenu)
-                                         : MenuItems(g_menu_open);
+    std::vector<MenuEntry> items = in_sub ? BuildSubMenu(g_submenu, st)
+                                          : BuildTopMenu(g_menu_open, st);
     if (items.empty())
         return;
 
@@ -1190,42 +963,37 @@ static void MoveMenuSelection(int delta) {
 }
 
 static void ActivateMenuSelection() {
+    MenuState st = MenuStateForUi();
     if (g_submenu != SUB_NONE) {
-        std::vector<MenuItem> sub = SubMenuItems(g_submenu);
+        std::vector<MenuEntry> sub = BuildSubMenu(g_submenu, st);
         if (g_submenu_sel >= 0 && g_submenu_sel < (int)sub.size() &&
             !sub[(size_t)g_submenu_sel].separator)
             ExecuteCommand(sub[(size_t)g_submenu_sel].command);
         return;
     }
 
-    std::vector<MenuItem> items = MenuItems(g_menu_open);
+    std::vector<MenuEntry> items = BuildTopMenu(g_menu_open, st);
     if (g_menu_sel < 0 || g_menu_sel >= (int)items.size())
         return;
-    const MenuItem &it = items[(size_t)g_menu_sel];
+    const MenuEntry &it = items[(size_t)g_menu_sel];
     if (it.separator)
         return;
-    if (it.has_submenu) {
-        g_submenu     = it.command;
+    if (it.submenu != SUB_NONE) {
+        g_submenu     = it.submenu;
         g_submenu_sel = 0;
         return;
     }
     ExecuteCommand(it.command);
 }
 
-static void HandleKeyDown(const SDL_KeyboardEvent &k) {
-    bool ctrl = (k.keysym.mod & KMOD_CTRL) != 0;
-
+static void HandleKeyDown(const WsEvent &k) {
     // Captura de tecla para el remapeo de un boton.
     if (g_capture_button >= 0) {
-        if (k.keysym.sym != SDLK_ESCAPE) {
-            SDL_Scancode sc = k.keysym.scancode;
-            // No se admite robar las teclas de la propia interfaz.
-            if (sc != SDL_SCANCODE_ESCAPE) {
-                g_cfg.bind[g_capture_button] = sc;
-                SetStatus(std::string("Boton ") + WsButtonName(g_capture_button) +
-                          " = " + KeyDisplayName(sc));
-                SaveConfig();
-            }
+        if (k.key != WSK_ESCAPE && k.key != WSK_UNKNOWN) {
+            g_cfg.bind[g_capture_button] = k.key;
+            SetStatus(std::string("Boton ") + WsButtonName(g_capture_button) +
+                      " = " + KeyDisplayName(k.key));
+            SaveConfig();
         } else {
             SetStatus("Remapeo cancelado");
         }
@@ -1234,13 +1002,13 @@ static void HandleKeyDown(const SDL_KeyboardEvent &k) {
     }
 
     if (g_browsing) {
-        if (k.keysym.sym == SDLK_ESCAPE) {
+        if (k.key == WSK_ESCAPE) {
             g_browsing = false;
-        } else if (k.keysym.sym == SDLK_DOWN) {
+        } else if (k.key == WSK_DOWN) {
             if (g_browse_sel + 1 < (int)g_browse_entries.size()) g_browse_sel++;
-        } else if (k.keysym.sym == SDLK_UP) {
+        } else if (k.key == WSK_UP) {
             if (g_browse_sel > 0) g_browse_sel--;
-        } else if (k.keysym.sym == SDLK_RETURN || k.keysym.sym == SDLK_KP_ENTER) {
+        } else if (k.key == WSK_RETURN || k.key == WSK_KP_ENTER) {
             BrowseActivate();
             // Si se cargo una ROM, se cierra el explorador.
             if (g_game_loaded)
@@ -1251,33 +1019,43 @@ static void HandleKeyDown(const SDL_KeyboardEvent &k) {
 
     // F1 (configurable) alterna entre horizontal y vertical, como girar la
     // consola. El nucleo remapea la cruceta el solo si esta en automatico.
-    if (k.keysym.scancode == g_cfg.key_rotate && g_menu_open < 0) {
+    if (k.key == g_cfg.key_rotate && g_menu_open < 0) {
         ToggleOrientation();
         return;
     }
 
+    // Con el menu nativo de Windows, la navegacion la lleva el sistema.
+    if (g_native_menu) {
+        if (k.ctrl && k.key == WSK_O)
+            ExecuteCommand(CMD_FILE_OPEN);
+        else if (k.key == WSK_SPACE)
+            ExecuteCommand(CMD_EMU_PAUSE);
+        return;
+    }
+
     if (g_menu_open >= 0) {
-        if (k.keysym.sym == SDLK_ESCAPE) {
+        if (k.key == WSK_ESCAPE) {
             if (g_submenu != SUB_NONE) {
                 g_submenu     = SUB_NONE;
                 g_submenu_sel = 0;
             } else {
                 g_menu_open = -1;
             }
-        } else if (k.keysym.sym == SDLK_DOWN) {
+        } else if (k.key == WSK_DOWN) {
             MoveMenuSelection(1);
-        } else if (k.keysym.sym == SDLK_UP) {
+        } else if (k.key == WSK_UP) {
             MoveMenuSelection(-1);
-        } else if (k.keysym.sym == SDLK_RIGHT) {
+        } else if (k.key == WSK_RIGHT) {
             if (g_submenu == SUB_NONE) {
-                std::vector<MenuItem> items = MenuItems(g_menu_open);
+                MenuState st = MenuStateForUi();
+                std::vector<MenuEntry> items = BuildTopMenu(g_menu_open, st);
                 if (g_menu_sel < (int)items.size() &&
-                    items[(size_t)g_menu_sel].has_submenu) {
-                    g_submenu     = items[(size_t)g_menu_sel].command;
+                    items[(size_t)g_menu_sel].submenu != SUB_NONE) {
+                    g_submenu     = items[(size_t)g_menu_sel].submenu;
                     g_submenu_sel = 0;
                 }
             }
-        } else if (k.keysym.sym == SDLK_LEFT) {
+        } else if (k.key == WSK_LEFT) {
             if (g_submenu != SUB_NONE) {
                 g_submenu     = SUB_NONE;
                 g_submenu_sel = 0;
@@ -1286,24 +1064,24 @@ static void HandleKeyDown(const SDL_KeyboardEvent &k) {
                 g_menu_sel  = 0;
                 g_submenu_sel = 0;
             }
-        } else if (k.keysym.sym == SDLK_RETURN || k.keysym.sym == SDLK_KP_ENTER) {
+        } else if (k.key == WSK_RETURN || k.key == WSK_KP_ENTER) {
             ActivateMenuSelection();
         }
         return;
     }
 
-    if (ctrl && k.keysym.sym == SDLK_o) {
+    if (k.ctrl && k.key == WSK_O) {
         ExecuteCommand(CMD_FILE_OPEN);
-    } else if (k.keysym.sym == SDLK_SPACE) {
+    } else if (k.key == WSK_SPACE) {
         ExecuteCommand(CMD_EMU_PAUSE);
-    } else if (k.keysym.sym == SDLK_ESCAPE) {
+    } else if (k.key == WSK_ESCAPE) {
         g_menu_open = -1;
         g_submenu   = SUB_NONE;
     }
 }
 
 // Rectangulo de una lista desplegable, para saber si el raton la toca.
-static bool ListHit(int x, int y, const std::vector<MenuItem> &items,
+static bool ListHit(int x, int y, const std::vector<MenuEntry> &items,
                     int mx, int my, int *index) {
     int w = ListWidth(items);
     int h = (int)items.size() * MENU_ITEM_H + 4;
@@ -1320,8 +1098,8 @@ static bool ListHit(int x, int y, const std::vector<MenuItem> &items,
     return true;
 }
 
-static void HandleMouseDown(const SDL_MouseButtonEvent &m) {
-    if (g_browsing)
+static void HandleMouseDown(const WsEvent &m) {
+    if (g_browsing || g_native_menu)
         return;
 
     if (m.y < MENUBAR_H) {
@@ -1337,16 +1115,17 @@ static void HandleMouseDown(const SDL_MouseButtonEvent &m) {
     }
 
     if (g_menu_open >= 0) {
-        std::vector<MenuItem> items = MenuItems(g_menu_open);
+        MenuState st = MenuStateForUi();
+        std::vector<MenuEntry> items = BuildTopMenu(g_menu_open, st);
         int x = MenuBarItemX(g_menu_open) - 4;
         int y = MENUBAR_H;
         int idx = -1;
 
         if (ListHit(x, y, items, m.x, m.y, &idx)) {
             g_menu_sel = idx;
-            const MenuItem &it = items[(size_t)idx];
-            if (it.has_submenu) {
-                g_submenu     = it.command;
+            const MenuEntry &it = items[(size_t)idx];
+            if (it.submenu != SUB_NONE) {
+                g_submenu     = it.submenu;
                 g_submenu_sel = 0;
                 return;
             }
@@ -1357,7 +1136,7 @@ static void HandleMouseDown(const SDL_MouseButtonEvent &m) {
         }
 
         if (g_submenu != SUB_NONE) {
-            std::vector<MenuItem> sub = SubMenuItems(g_submenu);
+            std::vector<MenuEntry> sub = BuildSubMenu(g_submenu, st);
             int sx = x + ListWidth(items);
             int sy = MENUBAR_H + 2 + g_menu_sel * MENU_ITEM_H;
             if (ListHit(sx, sy, sub, m.x, m.y, &idx)) {
@@ -1371,7 +1150,7 @@ static void HandleMouseDown(const SDL_MouseButtonEvent &m) {
     }
 }
 
-static void HandleBrowserMouse(const SDL_MouseButtonEvent &m) {
+static void HandleBrowserMouse(const WsEvent &m) {
     int y = 48;
     for (size_t i = 0; i < g_browse_entries.size(); ++i) {
         int h = MENU_ITEM_H + 4;
@@ -1388,14 +1167,14 @@ static void HandleBrowserMouse(const SDL_MouseButtonEvent &m) {
 // ---------------------------------------------------------------------------
 // Ejecucion de comandos de menu
 // ---------------------------------------------------------------------------
-static void ExecuteCommand(int cmd) {
+void ExecuteCommand(int cmd) {
     if (cmd == CMD_FILE_OPEN) {
         g_menu_open = -1;
         g_submenu   = SUB_NONE;
 
         // Primero el dialogo nativo; si no esta disponible o se cancela,
         // se ofrece el explorador integrado.
-        std::string picked = OpenFileDialog(g_window, BrowseStartDir());
+        std::string picked = OpenFileDialog(BrowseStartDir());
         if (!picked.empty())
             LoadGame(picked);
         else
@@ -1524,14 +1303,14 @@ static int SelfTest(const std::string &rom_path) {
     g_cfg.rotate = ROT_PORTRAIT;
     g_cfg.keymap = KEYMAP_LANDSCAPE;
     g_cfg.sound[SND_NOISE] = false;
-    g_cfg.bind[WSB_A] = SDL_SCANCODE_K;
+    g_cfg.bind[WSB_A] = WSK_K;
     g_cfg.Save(g_config_path);
 
     Config reread;
     reread.Load(g_config_path);
     if (reread.zoom != 3 || reread.rotate != ROT_PORTRAIT ||
         reread.keymap != KEYMAP_LANDSCAPE || reread.sound[SND_NOISE] ||
-        reread.bind[WSB_A] != SDL_SCANCODE_K) {
+        reread.bind[WSB_A] != WSK_K) {
         fprintf(stderr, "SELFTEST FALLO: el INI no conserva la configuracion\n");
         StopCore();
         return 1;
@@ -1544,12 +1323,7 @@ static int SelfTest(const std::string &rom_path) {
 }
 
 int main(int argc, char *argv[]) {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) != 0) {
-        fprintf(stderr, "SDL_Init fallo: %s\n", SDL_GetError());
-        return 1;
-    }
-
-    g_exe_dir = ExeDir();
+    g_exe_dir = WsExeDir();
     g_system_dir = g_exe_dir;
     g_save_dir   = JoinPath(g_exe_dir, "saves");
     g_assets_dir = JoinPath(g_exe_dir, "system");
@@ -1559,40 +1333,26 @@ int main(int argc, char *argv[]) {
     // tamano inicial.
     g_cfg.Load(g_config_path);
 
-    if (argc > 2 && strcmp(argv[1], "--selftest") == 0) {
-        int rc = SelfTest(argv[2]);
-        SDL_Quit();
-        return rc;
-    }
+    // La autocomprobacion no necesita ventana: asi tambien vale sin escritorio
+    // (integracion continua, sesiones sin pantalla).
+    if (argc > 2 && strcmp(argv[1], "--selftest") == 0)
+        return SelfTest(argv[2]);
 
-    g_window = SDL_CreateWindow(WSCAMP_VERSION_FULL,
-                                SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                224 * g_cfg.zoom, 144 * g_cfg.zoom + MENUBAR_H,
-                                SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    if (g_window == nullptr) {
-        fprintf(stderr, "SDL_CreateWindow fallo: %s\n", SDL_GetError());
-        SDL_Quit();
+    // El tamano inicial no puede depender de g_native_menu (aun no se sabe si
+    // hay menu nativo); se crea con el area de juego y se ajusta despues.
+    if (!WsInit(WSCAMP_VERSION_FULL, 224 * g_cfg.zoom,
+                144 * g_cfg.zoom + MENUBAR_H)) {
+        fprintf(stderr, "No se pudo crear la ventana\n");
         return 1;
     }
-
-    g_renderer = SDL_CreateRenderer(g_window, -1,
-                                    SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (g_renderer == nullptr) {
-        g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
-    }
-    if (g_renderer == nullptr) {
-        fprintf(stderr, "SDL_CreateRenderer fallo: %s\n", SDL_GetError());
-        SDL_DestroyWindow(g_window);
-        SDL_Quit();
-        return 1;
-    }
+    g_native_menu = WsHasNativeMenu();
+    // El tamano se reajusta ya sabiendo si hay barra nativa.
+    ApplyWindowSize();
 
     UpdateWindowTitle();
 
     if (!StartCore()) {
-        SDL_DestroyRenderer(g_renderer);
-        SDL_DestroyWindow(g_window);
-        SDL_Quit();
+        WsShutdown();
         return 1;
     }
 
@@ -1607,33 +1367,25 @@ int main(int argc, char *argv[]) {
     // correspondan; la presentacion sigue el ritmo del monitor.
     double  fps         = 60.0;
     double  frame_accum = 0.0;
-    Uint64  last_tick   = SDL_GetTicks64();
+    uint64_t last_tick  = WsTicks();
 
     while (g_running) {
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
+        WsEvent ev;
+        while (WsPollEvent(ev)) {
             switch (ev.type) {
-            case SDL_QUIT:
+            case WSE_QUIT:
                 g_running = false;
                 break;
-            case SDL_KEYDOWN:
-                if (!ev.key.repeat)
-                    HandleKeyDown(ev.key);
+            case WSE_KEYDOWN:
+                HandleKeyDown(ev);
                 break;
-            case SDL_WINDOWEVENT:
+            case WSE_RESIZE:
                 // Al redimensionar, maximizar o restaurar se redibuja con el
-                // tamano nuevo. SDL ya reajusta el renderer; aqui solo hay que
-                // no dejar el estado a medias.
-                if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
-                    ev.window.event == SDL_WINDOWEVENT_RESTORED ||
-                    ev.window.event == SDL_WINDOWEVENT_MAXIMIZED)
-                    g_window_dirty = true;
+                // tamano nuevo en el siguiente fotograma.
                 break;
-            case SDL_MOUSEBUTTONDOWN:
-                if (ev.button.button == SDL_BUTTON_LEFT) {
-                    if (g_browsing) HandleBrowserMouse(ev.button);
-                    else            HandleMouseDown(ev.button);
-                }
+            case WSE_MOUSEDOWN:
+                if (g_browsing) HandleBrowserMouse(ev);
+                else            HandleMouseDown(ev);
                 break;
             default:
                 break;
@@ -1647,7 +1399,7 @@ int main(int argc, char *argv[]) {
         if (running_emu) {
             fps = (g_av.timing.fps > 0.0) ? g_av.timing.fps : 60.0;
 
-            Uint64 now = SDL_GetTicks64();
+            uint64_t now = WsTicks();
             frame_accum += (double)(now - last_tick) * fps / 1000.0;
             last_tick = now;
 
@@ -1662,12 +1414,12 @@ int main(int argc, char *argv[]) {
             for (int i = 0; i < to_run; ++i)
                 g_core.retro_run();
         } else {
-            last_tick   = SDL_GetTicks64();
+            last_tick   = WsTicks();
             frame_accum = 0.0;
         }
 
         int ww = 0, wh = 0;
-        SDL_GetWindowSize(g_window, &ww, &wh);
+        WsGetSize(ww, wh);
 
         // El nucleo puede cambiar de orientacion al vuelo (juegos verticales).
         // Si la geometria base cambia, se reajusta la ventana; pero si el
@@ -1684,25 +1436,25 @@ int main(int argc, char *argv[]) {
         // cero dejaria basura en el backbuffer, asi que se omite el dibujado
         // hasta que vuelva a tener tamano.
         if (ww > 0 && wh > 0) {
-            BeginFrame(ww, wh);
+            WsBeginFrame(ww, wh);
             if (g_browsing) {
                 RenderBrowser(ww, wh);
             } else {
                 RenderEmulator(ww, wh);
                 RenderMenuDropdown();
             }
-            EndFrame();
+            WsEndFrame();
         }
 
         // Con la emulacion en marcha el ritmo lo marca el vsync de la
         // presentacion; en pausa o en los menus se limita a ~60 Hz para no
         // consumir CPU girando en vacio.
         if (!running_emu) {
-            Uint64 now = SDL_GetTicks64();
-            Uint64 spent = now - last_tick;
+            uint64_t now = WsTicks();
+            uint64_t spent = now - last_tick;
             if (spent < 16)
-                SDL_Delay((Uint32)(16 - spent));
-            last_tick = SDL_GetTicks64();
+                WsDelay((int)(16 - spent));
+            last_tick = WsTicks();
         }
     }
 
@@ -1710,9 +1462,6 @@ int main(int argc, char *argv[]) {
     SaveConfig();
 
     StopCore();
-    if (g_texture) SDL_DestroyTexture(g_texture);
-    SDL_DestroyRenderer(g_renderer);
-    SDL_DestroyWindow(g_window);
-    SDL_Quit();
+    WsShutdown();
     return 0;
 }
