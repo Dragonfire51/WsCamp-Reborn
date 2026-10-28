@@ -52,6 +52,9 @@ bool WsInit(const char *title, int width, int height) {
         return false;
     }
 
+    // El WonderSwan es pixel art: se escala al pixel mas cercano. Los filtros
+    // suaves quedan para mas adelante, como opcion.
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
     g_renderer = SDL_CreateRenderer(g_window, -1,
                                     SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (g_renderer == nullptr)
@@ -289,6 +292,10 @@ void WsSetAudioPaused(bool paused) {
 // ---------------------------------------------------------------------------
 void WsMessageBox(const char *title, const char *text) {
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, text, g_window);
+}
+
+void WsAboutDialog(const char *title, const char *body) {
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, title, body, g_window);
 }
 
 void WsLog(const char *fmt, ...) {

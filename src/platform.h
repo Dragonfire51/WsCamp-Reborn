@@ -107,6 +107,10 @@ void WsSetAudioPaused(bool paused);
 // ---------------------------------------------------------------------------
 void WsMessageBox(const char *title, const char *text);
 
+// Cuadro "Acerca de..." nativo. Se apoya en el dialogo del sistema, no en el
+// dibujado dentro de la ventana: asi se ve como el resto de programas.
+void WsAboutDialog(const char *title, const char *body);
+
 // ---------------------------------------------------------------------------
 // Registro
 // ---------------------------------------------------------------------------

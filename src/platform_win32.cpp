@@ -529,10 +529,11 @@ void WsDrawGame(const uint32_t *pixels, int disp_w, int disp_h,
     bi.bmiHeader.biBitCount    = 32;
     bi.bmiHeader.biCompression = BI_RGB;
 
-    // HALFTONE da una interpolacion suave al escalar, que es lo que se espera
-    // al maximizar; sin el, el juego se ve a bloques.
-    const int old_mode = SetStretchBltMode(g_mem_dc, HALFTONE);
-    SetBrushOrgEx(g_mem_dc, 0, 0, nullptr);
+    // COLORONCOLOR copia el pixel mas cercano, sin interpolar. El WonderSwan
+    // es pixel art de 224x144: con HALFTONE (interpolacion bilineal) los
+    // bordes se emborronan y el juego se ve "derretido". Los filtros suaves
+    // quedan para mas adelante, como opcion.
+    const int old_mode = SetStretchBltMode(g_mem_dc, COLORONCOLOR);
     StretchDIBits(g_mem_dc, dx, dy, dw, dh,
                   0, 0, disp_w, disp_h,
                   pixels, &bi, DIB_RGB_COLORS, SRCCOPY);
@@ -667,6 +668,11 @@ void WsSetAudioPaused(bool paused) {
 // ---------------------------------------------------------------------------
 void WsMessageBox(const char *title, const char *text) {
     MessageBoxA(g_hwnd, text, title, MB_OK | MB_ICONERROR);
+}
+
+void WsAboutDialog(const char *title, const char *body) {
+    // Cuadro nativo del sistema, como el de cualquier programa de Windows.
+    MessageBoxA(g_hwnd, body, title, MB_OK | MB_ICONINFORMATION);
 }
 
 void WsLog(const char *fmt, ...) {

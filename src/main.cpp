@@ -561,62 +561,18 @@ static void OpenBuiltinBrowser() {
 // ---------------------------------------------------------------------------
 // Dialogo "Acerca de..."
 // ---------------------------------------------------------------------------
+// Se delega en el dialogo del sistema: en Windows sale el cuadro nativo (con
+// su boton Aceptar y su icono), en Linux/macOS el del escritorio. Antes se
+// dibujaba dentro de la ventana y en Windows se veia como una caja ajena al
+// sistema.
 static void ShowAbout() {
-    bool open = true;
-    while (open && g_running) {
-        WsEvent ev;
-        while (WsPollEvent(ev)) {
-            if (ev.type == WSE_QUIT) {
-                g_running = false;
-                open = false;
-            } else if (ev.type == WSE_KEYDOWN || ev.type == WSE_MOUSEDOWN) {
-                open = false;
-            }
-        }
-
-        int ww = 0, wh = 0;
-        WsGetSize(ww, wh);
-
-        const int box_w = 460;
-        const int box_h = 220;
-        const int bx = (ww - box_w) / 2;
-        const int by = (wh - box_h) / 2;
-
-        WsBeginFrame(ww, wh);
-        WsFillRect(0, 0, ww, wh, WsColor{ 20, 20, 24, 255 });
-        WsFillRect(bx, by, box_w, box_h, WsColor{ 40, 40, 48, 255 });
-        WsFillRect(bx, by, box_w, 2, WsColor{ 200, 200, 210, 255 });
-        WsFillRect(bx, by + box_h - 2, box_w, 2, WsColor{ 200, 200, 210, 255 });
-        WsFillRect(bx, by, 2, box_h, WsColor{ 200, 200, 210, 255 });
-        WsFillRect(bx + box_w - 2, by, 2, box_h, WsColor{ 200, 200, 210, 255 });
-
-        WsColor title = { 255, 220, 120, 255 };
-        WsColor body  = { 230, 230, 235, 255 };
-        WsColor dim   = { 170, 170, 180, 255 };
-
-        int ty = by + 22;
-        WsDrawText(bx + 24, ty, WSCAMP_VERSION_FULL, UI_TEXT_SCALE, title);
-        ty += WsTextHeight(UI_TEXT_SCALE) + 14;
-
-        WsDrawText(bx + 24, ty, "Version: " WSCAMP_VERSION_STRING,
-                   UI_TEXT_SCALE, body);
-        ty += WsTextHeight(UI_TEXT_SCALE) + 10;
-
-        WsDrawText(bx + 24, ty, "Emulador WonderSwan / WonderSwan Color",
-                   UI_TEXT_SCALE, body);
-        ty += WsTextHeight(UI_TEXT_SCALE) + 8;
-        WsDrawText(bx + 24, ty, "Nucleo: beetle-wswan (mednafen/wswan)",
-                   UI_TEXT_SCALE, dim);
-        ty += WsTextHeight(UI_TEXT_SCALE) + 8;
-        WsDrawText(bx + 24, ty, "Interfaz nativa: GDI en Windows, SDL2 en el resto",
-                   UI_TEXT_SCALE, dim);
-        ty += WsTextHeight(UI_TEXT_SCALE) + 18;
-        WsDrawText(bx + 24, ty, "Pulsa cualquier tecla para cerrar",
-                   UI_TEXT_SCALE, dim);
-
-        WsEndFrame();
-        WsDelay(16);
-    }
+    std::string body =
+        std::string("Emulador WonderSwan / WonderSwan Color\n\n") +
+        "Version: " WSCAMP_VERSION_STRING "\n" +
+        "Nucleo: beetle-wswan (mednafen/wswan)\n" +
+        "Interfaz: nativa en Windows (GDI), SDL2 en Linux y macOS\n\n" +
+        "10 ranuras de Save State / Load State.";
+    WsAboutDialog(WSCAMP_VERSION_FULL, body.c_str());
 }
 
 // ---------------------------------------------------------------------------

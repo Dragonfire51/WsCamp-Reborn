@@ -8,7 +8,9 @@ ranuras de Save State / Load State.
 La interfaz tiene dos backends sobre una misma capa de plataforma:
 
 - **Windows**: interfaz nativa (Win32 + GDI). El texto usa una fuente del
-  sistema y la barra de menu es la del propio Windows; **no necesita SDL**.
+  sistema, la barra de menu y los cuadros de dialogo son los del propio
+  Windows; **no necesita SDL**. El juego se escala al pixel mas cercano (sin
+  filtro), que es lo correcto para el pixel art del WonderSwan.
 - **Linux y macOS**: interfaz SDL2, con fuente de mapa de bits integrada.
 
 ## Descargas
@@ -144,7 +146,8 @@ y coloca el nucleo junto al ejecutable.
 - **Opciones -> Controles**: remapeo de botones, remapeo de la cruceta al rotar
   (automatico, solo horizontal, solo vertical) y restauracion de los valores por
   defecto
-- **Ayuda -> Acerca de...**: version del emulador
+- **Ayuda -> Acerca de...**: cuadro de dialogo nativo del sistema con la
+  version del emulador
 - ROM por linea de comandos: `WsCampReborn juego.ws`
 
 Todo lo elegido en el menu se guarda en `WsCampReborn.ini`, junto al
