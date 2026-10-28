@@ -234,12 +234,6 @@ LINK_T_REPLACEMENT = """{
 };
 """
 
-# La introspeccion anade su simbolo al version-script. Va con su propia marca
-# porque link.T ya puede llevar la del parche de sonido (arboles ya parcheados).
-LINK_T_INTROSPECT_ANCHOR = "      ws_sound_ch_enabled;\n"
-LINK_T_INTROSPECT_REPL = ("      ws_sound_ch_enabled;\n"
-                          "      wscamp_get_input_state;\n")
-
 DMA_SRC_ANCHOR = "static uint32 SoundDMASource, SoundDMASourceSaved;\n"
 DMA_SRC_REPLACEMENT = "static uint32 SoundDMASource, SoundDMASourceSaved;\nextern int ws_sound_ch_enabled[7]; /* WSCAMP_SOUND_CHANNELS */\n"
 
@@ -333,12 +327,10 @@ def main():
     patch_regex(libretro_c, re.escape(INTROSPECT_ANCHOR),
                 INTROSPECT_ADDITION, "introspeccion",
                 "wscamp_get_input_state")
-    patch_regex(link_t, re.escape(LINK_T_INTROSPECT_ANCHOR),
-                LINK_T_INTROSPECT_REPL, "exportacion de introspeccion",
-                "wscamp_get_input_state")
-
+    # Un solo parche exporta los dos simbolos: las banderas de canal y la
+    # consulta de entrada que usan las pruebas.
     patch_file(link_t, [
-        (LINK_T_ANCHOR, LINK_T_REPLACEMENT, "exportacion de banderas"),
+        (LINK_T_ANCHOR, LINK_T_REPLACEMENT, "exportacion de simbolos"),
     ], "link.T")
 
     print("Listo.")
