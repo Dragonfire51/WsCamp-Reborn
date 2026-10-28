@@ -100,6 +100,45 @@ int main() {
         ok &= good;
     }
 
+    // --- Encaje de la imagen en la ventana (escalado) ---
+    // Es lo que fallaba al maximizar: la imagen se encogia pero nunca crecia,
+    // asi que el juego se quedaba pequeno en medio de una ventana grande.
+    {
+        int x, y, w, h;
+
+        // Ventana pequena (224x144): se reduce manteniendo el aspecto 14:9.
+        FitGameRect(112, 72, 224, 144, &x, &y, &w, &h);
+        bool good = (w == 112 && h == 72 && x == 0 && y == 0);
+        printf("encaje ventana pequena: %s (%dx%d en %d,%d)\n",
+               good ? "OK" : "FALLO", w, h, x, y);
+        ok &= good;
+
+        // Ventana maximizada (1920x1080 con 22 px de barra): la imagen crece
+        // hasta el alto util (1080-22) sin deformarse y queda centrada.
+        FitGameRect(1920, 1080 - 22, 224, 144, &x, &y, &w, &h);
+        int expect_h = 1058;
+        int expect_w = (int)(224.0 * 1058.0 / 144.0 + 0.5);
+        good = (h == expect_h && w == expect_w && x == (1920 - expect_w) / 2 && y == 0);
+        printf("encaje ventana maximizada: %s (%dx%d en %d,%d)\n",
+               good ? "OK" : "FALLO", w, h, x, y);
+        ok &= good;
+
+        // En vertical (144x224) el alto manda: la imagen crece con aspecto 9:14.
+        FitGameRect(1920, 1058, 144, 224, &x, &y, &w, &h);
+        expect_h = 1058;
+        expect_w = (int)(144.0 * 1058.0 / 224.0 + 0.5);
+        good = (h == expect_h && w == expect_w);
+        printf("encaje vertical: %s (%dx%d)\n", good ? "OK" : "FALLO", w, h);
+        ok &= good;
+
+        // Area util cero (ventana minimizada): rectangulo vacio, sin dividir
+        // por cero.
+        FitGameRect(0, 0, 224, 144, &x, &y, &w, &h);
+        good = (w == 0 && h == 0 && x == 0 && y == 0);
+        printf("encaje minimizada: %s (%dx%d)\n", good ? "OK" : "FALLO", w, h);
+        ok &= good;
+    }
+
     printf(ok ? "VIDEOTEST: OK\n" : "VIDEOTEST: FALLO\n");
     return ok ? 0 : 1;
 }

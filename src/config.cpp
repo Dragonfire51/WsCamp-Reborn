@@ -82,11 +82,11 @@ Config::Config() { Reset(); }
 
 void Config::Reset() {
     zoom     = 2;
-    flip     = false;
     master   = true;
     rotate   = ROT_MANUAL;
+    keymap   = KEYMAP_AUTO;
     mode_60hz = false;
-    key_flip = SDL_SCANCODE_F1;
+    key_rotate = SDL_SCANCODE_F1;
     for (int i = 0; i < SND_COUNT; ++i)
         sound[i] = true;
     for (int i = 0; i < WSB_COUNT; ++i)
@@ -134,14 +134,18 @@ void Config::Load(const std::string &path) {
     zoom   = atoi(get("video.zoom", "2").c_str());
     if (zoom < 1) zoom = 1;
     if (zoom > 4) zoom = 4;
-    flip     = ParseBool(get("video.flip", "0"), false);
     mode_60hz = ParseBool(get("video.mode_60hz", "0"), false);
-    key_flip = ParseKey(get("video.flip_key", "F1"));
+    key_rotate = ParseKey(get("video.rotate_key", get("video.flip_key", "F1")));
 
     rotate = ROT_MANUAL;
     std::string rot = get("video.rotate", "manual");
     if (rot == "portrait")       rotate = ROT_PORTRAIT;
     else if (rot == "landscape") rotate = ROT_LANDSCAPE;
+
+    keymap = KEYMAP_AUTO;
+    std::string km = get("input.rotate_keymap", "auto");
+    if (km == "landscape" || km == "disabled") keymap = KEYMAP_LANDSCAPE;
+    else if (km == "portrait" || km == "enabled") keymap = KEYMAP_PORTRAIT;
 
     master = ParseBool(get("sound.master", "1"), true);
     for (int i = 0; i < SND_COUNT; ++i) {
@@ -169,10 +173,9 @@ void Config::Save(const std::string &path) const {
 
     fprintf(f, "[Video]\n");
     fprintf(f, "zoom = %d\n", zoom);
-    fprintf(f, "flip = %d\n", flip ? 1 : 0);
     fprintf(f, "mode_60hz = %d\n", mode_60hz ? 1 : 0);
     fprintf(f, "rotate = %s\n", RotationName(rotate));
-    fprintf(f, "flip_key = %s\n\n", SDL_GetScancodeName(key_flip));
+    fprintf(f, "rotate_key = %s\n\n", SDL_GetScancodeName(key_rotate));
 
     fprintf(f, "[Sound]\n");
     fprintf(f, "master = %d\n", master ? 1 : 0);
@@ -181,6 +184,7 @@ void Config::Save(const std::string &path) const {
     fprintf(f, "\n");
 
     fprintf(f, "[Input]\n");
+    fprintf(f, "rotate_keymap = %s\n", KeymapName(keymap));
     for (int i = 0; i < WSB_COUNT; ++i)
         fprintf(f, "%s = %s\n", BUTTONS[i].key, KeyName(bind[i]).c_str());
 
@@ -204,6 +208,16 @@ const char *RotationName(int r) {
     case ROT_PORTRAIT:  return "portrait";
     case ROT_LANDSCAPE: return "landscape";
     default:            return "manual";
+    }
+}
+
+// Nombre que entiende el nucleo (wswan_rotate_keymap). El INI admite ademas
+// "landscape" y "portrait", que son mas legibles.
+const char *KeymapName(int m) {
+    switch (m) {
+    case KEYMAP_LANDSCAPE: return "disabled";
+    case KEYMAP_PORTRAIT:  return "enabled";
+    default:               return "auto";
     }
 }
 

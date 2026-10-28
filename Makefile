@@ -65,6 +65,15 @@ else
   endif
 endif
 
+# Extension del nucleo para la plataforma en curso (la usan las pruebas).
+ifneq (,$(filter windows%,$(PLATFORM)))
+  CORE_EXT := .dll
+else ifneq (,$(filter macos%,$(PLATFORM)))
+  CORE_EXT := .dylib
+else
+  CORE_EXT := .so
+endif
+
 TARGET := $(TARGET_NAME)$(EXT)
 SRCS   := $(wildcard $(SRCDIR)/*.cpp)
 OBJS   := $(patsubst $(SRCDIR)/%.cpp,$(OBJDIR)/%.o,$(SRCS))
@@ -100,13 +109,10 @@ test: $(TARGET)
 		tests/video_test.cpp $(SRCDIR)/video.cpp -o $(OBJDIR)/video_test $(LDLIBS)
 	$(OBJDIR)/video_test
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Isrc $(PLATFLAGS) \
-		tests/flip_test.cpp -o $(OBJDIR)/flip_test $(LDLIBS)
-	SDL_VIDEODRIVER=dummy $(OBJDIR)/flip_test
-	$(CXX) -std=c++17 -O2 -Wall -Wextra -Isrc $(PLATFLAGS) \
 		tests/sound_test.cpp $(SRCDIR)/ws_core.cpp -o $(OBJDIR)/sound_test $(LDLIBS)
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Isrc $(PLATFLAGS) \
 		tests/rotation_test.cpp $(SRCDIR)/ws_core.cpp -o $(OBJDIR)/rotation_test $(LDLIBS)
-	@CORE=$$(ls lib/mednafen_wswan_libretro.* 2>/dev/null | head -1); \
+	@CORE=$$(ls lib/mednafen_wswan_libretro$(CORE_EXT) 2>/dev/null | head -1); \
 	if [ -z "$$CORE" ]; then \
 		echo "test: sin nucleo en lib/, se omiten sound_test y rotation_test"; \
 	elif [ -n "$(ROM)" ]; then \

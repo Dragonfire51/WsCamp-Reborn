@@ -16,3 +16,13 @@
 void ConvertFrame(const void *data, unsigned width, unsigned height, size_t pitch,
                   enum retro_pixel_format fmt, unsigned rotation,
                   std::vector<uint32_t> &out, unsigned &out_w, unsigned &out_h);
+
+// Calcula el rectangulo donde se dibuja la imagen del juego dentro del area de
+// vision, manteniendo la relacion de aspecto y centrada. La imagen crece para
+// llenar la ventana y se encoge si no cabe: antes solo se encogia, y por eso al
+// maximizar el juego se quedaba pequeno en medio de la pantalla.
+//
+// Devuelve el rectangulo en x, y, w, h. Con un area o una imagen de tamano cero
+// deja el rectangulo vacio (0,0,0,0).
+void FitGameRect(int view_w, int view_h, int disp_w, int disp_h,
+                 int *x, int *y, int *w, int *h);

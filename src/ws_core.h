@@ -178,6 +178,11 @@ public:
 
     const std::string &last_error() const { return last_error_; }
 
+    // Resuelve un simbolo suelto. Lo usan las pruebas para la introspeccion
+    // opcional del nucleo (wscamp_get_input_state). Devuelve nullptr si el
+    // nucleo no lo exporta.
+    void *Symbol(const char *name) const;
+
     // --- funciones del nucleo ---
     void     (*retro_init)(void)                                        = nullptr;
     void     (*retro_deinit)(void)                                      = nullptr;

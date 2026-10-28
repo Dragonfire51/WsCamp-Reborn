@@ -85,3 +85,27 @@ void ConvertFrame(const void *data, unsigned width, unsigned height, size_t pitc
         }
     }
 }
+
+void FitGameRect(int view_w, int view_h, int disp_w, int disp_h,
+                 int *x, int *y, int *w, int *h) {
+    *x = *y = *w = *h = 0;
+    if (view_w <= 0 || view_h <= 0 || disp_w <= 0 || disp_h <= 0)
+        return;
+
+    // El menor de los dos factores llena la ventana sin deformar la imagen.
+    double sx = (double)view_w / disp_w;
+    double sy = (double)view_h / disp_h;
+    double scale = (sx < sy) ? sx : sy;
+    if (scale <= 0.0)
+        return;
+
+    int dw = (int)(disp_w * scale + 0.5);
+    int dh = (int)(disp_h * scale + 0.5);
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+
+    *w = dw;
+    *h = dh;
+    *x = (view_w - dw) / 2;
+    *y = (view_h - dh) / 2;
+}

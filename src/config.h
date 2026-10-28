@@ -47,15 +47,25 @@ enum DisplayRotation {
     ROT_LANDSCAPE       // juegos horizontales
 };
 
+// Remapeo de la cruceta al rotar (opcion wswan_rotate_keymap del nucleo). El
+// WonderSwan tiene dos crucetas: en horizontal manda la X y en vertical la Y,
+// con los botones fisicos en otro sitio. El nucleo hace el intercambio solo.
+enum KeymapMode {
+    KEYMAP_AUTO = 0,    // se ajusta a la orientacion actual (por defecto)
+    KEYMAP_LANDSCAPE,   // se queda como en horizontal
+    KEYMAP_PORTRAIT      // se queda como en vertical
+};
+
 struct Config {
-    int          zoom     = 2;      // 1..4
-    bool         flip     = false;  // F1: voltea la ventana entera 180 grados
+    int          zoom     = 2;      // tamano inicial de la ventana (1..4)
     bool         master   = true;   // silencio general
     int          rotate   = ROT_MANUAL;
+    int          keymap   = KEYMAP_AUTO;
     bool         mode_60hz = false; // el nucleo baja de 75 a 60 Hz
     bool         sound[SND_COUNT];
     SDL_Scancode bind[WSB_COUNT];
-    SDL_Scancode key_flip = SDL_SCANCODE_F1;
+    // F1: alterna entre horizontal y vertical, como en la consola real.
+    SDL_Scancode key_rotate = SDL_SCANCODE_F1;
 
     Config();
 
@@ -75,4 +85,5 @@ const char *WsButtonName(int b);
 unsigned    WsButtonRetroId(int b);
 const char *SoundItemName(int i);
 const char *RotationName(int r);
+const char *KeymapName(int m);
 std::string KeyDisplayName(SDL_Scancode sc);

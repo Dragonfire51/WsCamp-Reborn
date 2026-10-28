@@ -32,12 +32,12 @@ enum MenuCommand {
     CMD_EMU_RESET,
     CMD_EMU_PAUSE,
 
-    // Opciones -> Video (zoom y volteo)
+    // Opciones -> Video (zoom y orientacion)
     CMD_VIDEO_ZOOM_1 = 100,
     CMD_VIDEO_ZOOM_2,
     CMD_VIDEO_ZOOM_3,
     CMD_VIDEO_ZOOM_4,
-    CMD_VIDEO_FLIP,
+    CMD_VIDEO_ROT_TOGGLE,   // F1: alterna horizontal / vertical
 
     // Orientacion de la pantalla (juegos verticales como Wonder Classic).
     // Se suman ROT_MANUAL, ROT_PORTRAIT y ROT_LANDSCAPE.
@@ -50,6 +50,8 @@ enum MenuCommand {
 
     // Opciones -> Controles (remapeo de botones)
     CMD_INPUT_BIND_BASE = 300,
+    // Se suman KEYMAP_AUTO, KEYMAP_LANDSCAPE y KEYMAP_PORTRAIT.
+    CMD_INPUT_KEYMAP_BASE = 350,
     CMD_INPUT_RESET = 400,
 
     // Ayuda

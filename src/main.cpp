@@ -71,15 +71,13 @@ static Uint32            g_status_until = 0;
 // Mapeo de teclas
 static int               g_capture_button = -1;  // boton que espera una tecla
 
-// Volteo de la ventana completa (F1). Se dibuja todo en esta textura y luego
-// se presenta girada 180 grados, de modo que tambien giran el menu y el
-// explorador. Solo existe mientras el volteo esta activo.
-static SDL_Texture      *g_flip_target   = nullptr;
-static int               g_flip_w = 0, g_flip_h = 0;
-
 // Ultimo tamano base con el que se ajusto la ventana; sirve para reaccionar
 // cuando el nucleo cambia de orientacion (juegos verticales).
 static unsigned          g_sized_base_w = 0, g_sized_base_h = 0;
+
+// Se pone a true cuando la ventana cambia de tamano, para forzar un redibujado
+// completo aunque la emulacion este en pausa o en un menu.
+static bool              g_window_dirty = false;
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -297,6 +295,7 @@ static const char *OptionValue(const char *key) {
     if (strcmp(key, "wswan_sound_pcm") == 0)   return g_cfg.sound[SND_PCM]   ? "enabled" : "disabled";
     if (strcmp(key, "wswan_sound_dma") == 0)   return g_cfg.sound[SND_DMA]   ? "enabled" : "disabled";
     if (strcmp(key, "wswan_rotate_display") == 0) return RotationName(g_cfg.rotate);
+    if (strcmp(key, "wswan_rotate_keymap") == 0)  return KeymapName(g_cfg.keymap);
     if (strcmp(key, "wswan_60hz_mode") == 0)   return g_cfg.mode_60hz ? "enabled" : "disabled";
     return nullptr;
 }
@@ -899,9 +898,8 @@ static std::vector<MenuItem> SubMenuItems(int submenu) {
         items.push_back(Checked("Zoom 3x", CMD_VIDEO_ZOOM_3, g_cfg.zoom == 3));
         items.push_back(Checked("Zoom 4x", CMD_VIDEO_ZOOM_4, g_cfg.zoom == 4));
         items.push_back(Separator());
-        items.push_back(Checked("Voltear ventana  (F1)", CMD_VIDEO_FLIP, g_cfg.flip));
-        items.push_back(Separator());
-        items.push_back(Checked("Orientacion: manual", CMD_VIDEO_ROT_BASE + ROT_MANUAL,
+        items.push_back(Item("Alternar horizontal / vertical  (F1)", CMD_VIDEO_ROT_TOGGLE));
+        items.push_back(Checked("Orientacion: automatica (Select)", CMD_VIDEO_ROT_BASE + ROT_MANUAL,
                                 g_cfg.rotate == ROT_MANUAL));
         items.push_back(Checked("Orientacion: vertical", CMD_VIDEO_ROT_BASE + ROT_PORTRAIT,
                                 g_cfg.rotate == ROT_PORTRAIT));
@@ -924,6 +922,16 @@ static std::vector<MenuItem> SubMenuItems(int submenu) {
             items.push_back(Item(label, CMD_INPUT_BIND_BASE + b));
         }
         items.push_back(Separator());
+        items.push_back(Checked("Cruceta al rotar: automatica",
+                                CMD_INPUT_KEYMAP_BASE + KEYMAP_AUTO,
+                                g_cfg.keymap == KEYMAP_AUTO));
+        items.push_back(Checked("Cruceta al rotar: solo horizontal",
+                                CMD_INPUT_KEYMAP_BASE + KEYMAP_LANDSCAPE,
+                                g_cfg.keymap == KEYMAP_LANDSCAPE));
+        items.push_back(Checked("Cruceta al rotar: solo vertical",
+                                CMD_INPUT_KEYMAP_BASE + KEYMAP_PORTRAIT,
+                                g_cfg.keymap == KEYMAP_PORTRAIT));
+        items.push_back(Separator());
         items.push_back(Item("Restaurar valores por defecto", CMD_INPUT_RESET));
         break;
     }
@@ -945,17 +953,26 @@ static void UpdateWindowTitle() {
     SDL_SetWindowTitle(g_window, title.c_str());
 }
 
-// Ajusta la ventana al zoom elegido; el usuario puede redimensionarla despues.
+// Tamano base del juego segun la orientacion actual (224x144 o 144x224).
+static void BaseGameSize(unsigned &w, unsigned &h) {
+    w = (g_av.geometry.base_width  > 0) ? g_av.geometry.base_width  : 224;
+    h = (g_av.geometry.base_height > 0) ? g_av.geometry.base_height : 144;
+}
+
+// Ajusta la ventana al zoom elegido. Si el usuario la ha maximizado (o la ha
+// redimensionado a mano), no se le cambia el tamano: solo se toca cuando la
+// ventana es la que fijo el zoom. Antes se forzaba siempre y por eso al
+// maximizar y restaurar saltaba a un tamano equivocado.
 static void ApplyWindowSize() {
     if (g_window == nullptr)
         return;
+    if ((SDL_GetWindowFlags(g_window) &
+         (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN |
+          SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0)
+        return;
 
-    unsigned base_w = 224;
-    unsigned base_h = 144;
-    if (g_av.geometry.base_width > 0 && g_av.geometry.base_height > 0) {
-        base_w = g_av.geometry.base_width;
-        base_h = g_av.geometry.base_height;
-    }
+    unsigned base_w = 0, base_h = 0;
+    BaseGameSize(base_w, base_h);
     SDL_SetWindowSize(g_window,
                       (int)base_w * g_cfg.zoom,
                       (int)base_h * g_cfg.zoom + MENUBAR_H);
@@ -967,38 +984,37 @@ static void SaveConfig() {
 }
 
 // ---------------------------------------------------------------------------
-// Volteo de la ventana completa
+// Orientacion
 // ---------------------------------------------------------------------------
-// Con el volteo activo, toda la interfaz se dibuja en una textura del tamano de
-// la ventana y se presenta girada 180 grados. Asi el menu, el explorador y los
-// mensajes giran junto con la imagen del juego.
-static void BeginFrame(int ww, int wh) {
-    if (!g_cfg.flip) {
-        SDL_SetRenderTarget(g_renderer, nullptr);
-        return;
-    }
+// El WonderSwan se gira 90 grados para los juegos verticales. F1 hace lo mismo
+// que girar la consola: alterna entre horizontal y vertical, y el nucleo se
+// encarga de la imagen y de remapear la cruceta. Cygne (emulador Win32 de
+// referencia) lo hace igual con su tecla de flip.
+static bool OrientationIsPortrait() {
+    if (g_cfg.rotate == ROT_PORTRAIT)
+        return true;
+    if (g_cfg.rotate == ROT_LANDSCAPE)
+        return false;
+    // En automatico manda el nucleo: la pantalla es vertical si es mas alta
+    // que ancha.
+    return g_av.geometry.base_height > g_av.geometry.base_width;
+}
 
-    if (g_flip_target == nullptr || g_flip_w != ww || g_flip_h != wh) {
-        if (g_flip_target != nullptr)
-            SDL_DestroyTexture(g_flip_target);
-        g_flip_target = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888,
-                                          SDL_TEXTUREACCESS_TARGET, ww, wh);
-        g_flip_w = ww;
-        g_flip_h = wh;
-    }
-    if (g_flip_target == nullptr) {
-        SDL_SetRenderTarget(g_renderer, nullptr);
-        return;
-    }
-    SDL_SetRenderTarget(g_renderer, g_flip_target);
+static void ToggleOrientation() {
+    // Se parte de la orientacion efectiva para que el primer F1 haga lo que
+    // el usuario espera aunque la opcion este en automatico.
+    g_cfg.rotate = OrientationIsPortrait() ? ROT_LANDSCAPE : ROT_PORTRAIT;
+    g_options_dirty = true;
+    SaveConfig();
+    SetStatus(g_cfg.rotate == ROT_PORTRAIT ? "Pantalla vertical (144x224)"
+                                           : "Pantalla horizontal (224x144)");
+}
+
+static void BeginFrame(int, int) {
+    SDL_SetRenderTarget(g_renderer, nullptr);
 }
 
 static void EndFrame() {
-    if (g_cfg.flip && g_flip_target != nullptr) {
-        SDL_SetRenderTarget(g_renderer, nullptr);
-        SDL_RenderCopyEx(g_renderer, g_flip_target, nullptr, nullptr, 180.0,
-                         nullptr, SDL_FLIP_NONE);
-    }
     SDL_RenderPresent(g_renderer);
 }
 
@@ -1030,24 +1046,12 @@ static void RenderEmulator(int ww, int wh) {
             SDL_UpdateTexture(g_texture, nullptr, g_display.data(),
                               (int)g_display_w * 4);
 
-            // El zoom manda: la imagen se dibuja a zoom * pixel de juego y se
-            // reduce solo si no cabe en la ventana.
-            int dw = (int)g_display_w * g_cfg.zoom;
-            int dh = (int)g_display_h * g_cfg.zoom;
-
-            double fit = 1.0;
-            if (dw > ww && dw > 0) fit = (double)ww / dw;
-            if (dh > view_h && dh > 0) {
-                double f2 = (double)view_h / dh;
-                if (f2 < fit) fit = f2;
-            }
-            if (fit < 1.0) {
-                dw = (int)(dw * fit);
-                dh = (int)(dh * fit);
-            }
-
-            int dx = (ww - dw) / 2;
-            int dy = MENUBAR_H + (view_h - dh) / 2;
+            // La imagen llena el area de vision manteniendo su aspecto. El
+            // zoom solo decide el tamano inicial de la ventana.
+            int dx = 0, dy = 0, dw = 0, dh = 0;
+            FitGameRect(ww, view_h, (int)g_display_w, (int)g_display_h,
+                        &dx, &dy, &dw, &dh);
+            dy += MENUBAR_H;
 
             SDL_Rect dst = { dx, dy, dw, dh };
             SDL_RenderCopy(g_renderer, g_texture, nullptr, &dst);
@@ -1245,11 +1249,10 @@ static void HandleKeyDown(const SDL_KeyboardEvent &k) {
         return;
     }
 
-    // Volteo de la imagen: la tecla configurada (F1 por defecto).
-    if (k.keysym.scancode == g_cfg.key_flip && g_menu_open < 0) {
-        g_cfg.flip = !g_cfg.flip;
-        SaveConfig();
-        SetStatus(g_cfg.flip ? "Ventana volteada" : "Ventana normal");
+    // F1 (configurable) alterna entre horizontal y vertical, como girar la
+    // consola. El nucleo remapea la cruceta el solo si esta en automatico.
+    if (k.keysym.scancode == g_cfg.key_rotate && g_menu_open < 0) {
+        ToggleOrientation();
         return;
     }
 
@@ -1413,10 +1416,9 @@ static void ExecuteCommand(int cmd) {
         ApplyWindowSize();
         SaveConfig();
         SetStatus("Zoom " + std::to_string(g_cfg.zoom) + "x");
-    } else if (cmd == CMD_VIDEO_FLIP) {
-        g_cfg.flip = !g_cfg.flip;
-        SaveConfig();
-        SetStatus(g_cfg.flip ? "Ventana volteada" : "Ventana normal");
+    } else if (cmd == CMD_VIDEO_ROT_TOGGLE) {
+        // F1: alterna horizontal y vertical, igual que girar la consola.
+        ToggleOrientation();
     } else if (cmd >= CMD_VIDEO_ROT_BASE &&
                cmd < CMD_VIDEO_ROT_BASE + 3) {
         g_cfg.rotate = cmd - CMD_VIDEO_ROT_BASE;
@@ -1449,10 +1451,19 @@ static void ExecuteCommand(int cmd) {
         g_capture_button = cmd - CMD_INPUT_BIND_BASE;
         SetStatus(std::string("Pulsa la tecla para ") +
                   WsButtonName(g_capture_button) + "  (Esc cancela)");
+    } else if (cmd >= CMD_INPUT_KEYMAP_BASE && cmd < CMD_INPUT_KEYMAP_BASE + 3) {
+        g_cfg.keymap = cmd - CMD_INPUT_KEYMAP_BASE;
+        g_options_dirty = true;
+        SaveConfig();
+        const char *nombres[] = { "automatica", "solo horizontal", "solo vertical" };
+        SetStatus(std::string("Cruceta al rotar: ") + nombres[g_cfg.keymap]);
     } else if (cmd == CMD_INPUT_RESET) {
         Config defaults;
         for (int b = 0; b < WSB_COUNT; ++b)
             g_cfg.bind[b] = defaults.bind[b];
+        g_cfg.key_rotate = defaults.key_rotate;
+        g_cfg.keymap     = defaults.keymap;
+        g_options_dirty  = true;
         SaveConfig();
         SetStatus("Controles restaurados");
     } else if (cmd >= CMD_SAVE_STATE_BASE && cmd < CMD_SAVE_STATE_BASE + WSCAMP_STATE_SLOTS) {
@@ -1510,14 +1521,16 @@ static int SelfTest(const std::string &rom_path) {
 
     // Configuracion: guardar, releer y comprobar que se conserva.
     g_cfg.zoom   = 3;
-    g_cfg.flip   = true;
+    g_cfg.rotate = ROT_PORTRAIT;
+    g_cfg.keymap = KEYMAP_LANDSCAPE;
     g_cfg.sound[SND_NOISE] = false;
     g_cfg.bind[WSB_A] = SDL_SCANCODE_K;
     g_cfg.Save(g_config_path);
 
     Config reread;
     reread.Load(g_config_path);
-    if (reread.zoom != 3 || !reread.flip || reread.sound[SND_NOISE] ||
+    if (reread.zoom != 3 || reread.rotate != ROT_PORTRAIT ||
+        reread.keymap != KEYMAP_LANDSCAPE || reread.sound[SND_NOISE] ||
         reread.bind[WSB_A] != SDL_SCANCODE_K) {
         fprintf(stderr, "SELFTEST FALLO: el INI no conserva la configuracion\n");
         StopCore();
@@ -1607,19 +1620,19 @@ int main(int argc, char *argv[]) {
                 if (!ev.key.repeat)
                     HandleKeyDown(ev.key);
                 break;
+            case SDL_WINDOWEVENT:
+                // Al redimensionar, maximizar o restaurar se redibuja con el
+                // tamano nuevo. SDL ya reajusta el renderer; aqui solo hay que
+                // no dejar el estado a medias.
+                if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+                    ev.window.event == SDL_WINDOWEVENT_RESTORED ||
+                    ev.window.event == SDL_WINDOWEVENT_MAXIMIZED)
+                    g_window_dirty = true;
+                break;
             case SDL_MOUSEBUTTONDOWN:
                 if (ev.button.button == SDL_BUTTON_LEFT) {
-                    // Con el volteo activo la ventana se presenta girada, asi
-                    // que la posicion del raton se refleja antes de usarla.
-                    SDL_MouseButtonEvent b = ev.button;
-                    if (g_cfg.flip) {
-                        int ww = 0, wh = 0;
-                        SDL_GetWindowSize(g_window, &ww, &wh);
-                        b.x = ww - 1 - b.x;
-                        b.y = wh - 1 - b.y;
-                    }
-                    if (g_browsing) HandleBrowserMouse(b);
-                    else            HandleMouseDown(b);
+                    if (g_browsing) HandleBrowserMouse(ev.button);
+                    else            HandleMouseDown(ev.button);
                 }
                 break;
             default:
@@ -1656,25 +1669,30 @@ int main(int argc, char *argv[]) {
         int ww = 0, wh = 0;
         SDL_GetWindowSize(g_window, &ww, &wh);
 
-        // El nucleo puede cambiar de orientacion al vuelo (juegos verticales):
-        // si la geometria base ya no coincide con la ultima usada, se reajusta
-        // la ventana para que la imagen no quede recortada.
-        unsigned bw = (g_av.geometry.base_width  > 0) ? g_av.geometry.base_width  : 224;
-        unsigned bh = (g_av.geometry.base_height > 0) ? g_av.geometry.base_height : 144;
+        // El nucleo puede cambiar de orientacion al vuelo (juegos verticales).
+        // Si la geometria base cambia, se reajusta la ventana; pero si el
+        // usuario la ha maximizado o redimensionado, se respeta su tamano.
+        unsigned bw = 0, bh = 0;
+        BaseGameSize(bw, bh);
         if (bw != g_sized_base_w || bh != g_sized_base_h) {
             g_sized_base_w = bw;
             g_sized_base_h = bh;
             ApplyWindowSize();
         }
 
-        BeginFrame(ww, wh);
-        if (g_browsing) {
-            RenderBrowser(ww, wh);
-        } else {
-            RenderEmulator(ww, wh);
-            RenderMenuDropdown();
+        // Con la ventana minimizada no hay area util: presentar con tamano
+        // cero dejaria basura en el backbuffer, asi que se omite el dibujado
+        // hasta que vuelva a tener tamano.
+        if (ww > 0 && wh > 0) {
+            BeginFrame(ww, wh);
+            if (g_browsing) {
+                RenderBrowser(ww, wh);
+            } else {
+                RenderEmulator(ww, wh);
+                RenderMenuDropdown();
+            }
+            EndFrame();
         }
-        EndFrame();
 
         // Con la emulacion en marcha el ritmo lo marca el vsync de la
         // presentacion; en pausa o en los menus se limita a ~60 Hz para no

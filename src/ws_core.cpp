@@ -65,6 +65,12 @@ bool WsCore::Load(const std::string &library_path) {
     return true;
 }
 
+void *WsCore::Symbol(const char *name) const {
+    if (handle_ == nullptr || name == nullptr)
+        return nullptr;
+    return SDL_LoadFunction(handle_, name);
+}
+
 void WsCore::Unload() {
     if (handle_ != nullptr) {
         SDL_UnloadObject(handle_);
