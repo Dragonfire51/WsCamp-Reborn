@@ -2,8 +2,14 @@
 
 WonderSwan and WonderSwan Color Emulator.
 
-Frontend libretro sobre **SDL2** para el nucleo **beetle-wswan**
-(mednafen/wswan), con 10 ranuras de Save State / Load State.
+Frontend libretro para el nucleo **beetle-wswan** (mednafen/wswan), con 10
+ranuras de Save State / Load State.
+
+La interfaz tiene dos backends sobre una misma capa de plataforma:
+
+- **Windows**: interfaz nativa (Win32 + GDI). El texto usa una fuente del
+  sistema y la barra de menu es la del propio Windows; **no necesita SDL**.
+- **Linux y macOS**: interfaz SDL2, con fuente de mapa de bits integrada.
 
 ## Descargas
 
@@ -25,15 +31,20 @@ Los binarios se publican en la pagina de releases:
 ```
 WsCamp-Reborn/
 ├── src/
-│   ├── main.cpp        # Frontend SDL2: ventana, audio, menu, explorador
-│   ├── video.cpp/.h    # Conversion de fotogramas y rotacion
+│   ├── main.cpp        # Frontend comun: menu, explorador, emulacion, estados
+│   ├── platform.h      # Interfaz de la capa de plataforma
+│   ├── platform_win32.cpp  # Backend nativo de Windows (GDI, menu, waveOut)
+│   ├── platform_sdl.cpp    # Backend SDL2 (Linux y macOS)
+│   ├── menu_model.cpp/.h   # Modelo de menu compartido por los dos backends
+│   ├── keys.cpp/.h     # Codigos de tecla neutrales y nombres
+│   ├── video.cpp/.h    # Conversion de fotogramas y escalado
 │   ├── config.cpp/.h   # Configuracion persistente (WsCampReborn.ini)
 │   ├── menu.h          # IDs de comandos y geometria de la interfaz
 │   ├── version.h       # Fuente unica de la version (About, titulo, releases)
-│   ├── font5x7.h       # Fuente de mapa de bits integrada (sin dependencias)
+│   ├── font5x7.h       # Fuente de mapa de bits integrada (backend SDL)
 │   ├── nfd.cpp/.h      # Dialogo nativo de apertura de ficheros
 │   ├── ws_core.h       # ABI minima de libretro + clase cargadora WsCore
-│   └── ws_core.cpp     # Carga dinamica portable (SDL_LoadObject)
+│   └── ws_core.cpp     # Carga dinamica portable (dlopen / LoadLibrary)
 ├── tests/              # Pruebas de video, de sonido y autocomprobacion
 ├── tools/
 │   ├── build_core.sh   # Compila el nucleo (con control por canal) en lib/
@@ -59,11 +70,15 @@ mano con `workflow_dispatch` indicando `version`.
 
 ## Requisitos
 
-- **SDL2** de desarrollo:
+- **SDL2** de desarrollo, solo en Linux y macOS (en Windows la interfaz es
+  nativa y no lo necesita):
   - Debian/Ubuntu: `sudo apt install libsdl2-dev`
   - macOS: `brew install sdl2`
-  - MSYS2: `pacman -S mingw-w64-x86_64-SDL2`
 - El nucleo libretro **beetle-wswan**
+
+Para compilar para Windows hace falta MinGW-w64 (`g++-mingw-w64-x86-64` /
+`g++-mingw-w64-i686`); no hace falta ninguna libreria extra, solo las de
+Windows (`gdi32`, `comdlg32`, `winmm`, `user32`).
 
 ## Compilar
 
@@ -73,7 +88,7 @@ make CROSS=x86_64          # Windows 64 bits (MinGW-w64)
 make CROSS=i686            # Windows 32 bits (MinGW-w64)
 make VERSION=1.2.3         # sobreescribe la version
 make core                  # compila el nucleo con control por canal en lib/
-make test ROM=juego.ws     # pruebas de video, de sonido y autocomprobacion
+make test ROM=juego.ws     # pruebas de video, escalado, rotacion, sonido y selftest
 make info                  # muestra plataforma, compilador y version
 make clean
 ```
@@ -88,9 +103,9 @@ make clean
 
 ## El nucleo
 
-El nucleo se carga en tiempo de ejecucion (`SDL_LoadObject` -> `dlopen` /
-`LoadLibrary`), asi que **no hace falta** ninguna libreria de importacion al
-compilar. Se busca junto al ejecutable y en `lib/`:
+El nucleo se carga en tiempo de ejecucion (`dlopen` en Linux/macOS,
+`LoadLibrary` en Windows), asi que **no hace falta** ninguna libreria de
+importacion al compilar. Se busca junto al ejecutable y en `lib/`:
 
 | Sistema | Fichero |
 |---------|---------|
@@ -112,20 +127,23 @@ queda en `build/core/`. Si ya hay una copia del nucleo, basta con ponerla en
 `lib/`: el emulador funciona igual, solo que sin el control por canal (las
 opciones aparecen pero no tienen efecto).
 
-En Windows, el paquete publicado ya incluye `SDL2.dll` y el nucleo; en
-Linux/macOS instala SDL2 con el gestor de paquetes.
+En Windows, el paquete publicado incluye el nucleo y **ninguna DLL extra**
+(la interfaz es nativa). En Linux/macOS instala SDL2 con el gestor de paquetes
+y coloca el nucleo junto al ejecutable.
 
 ## Uso
 
 - **Archivo -> Abrir ROM...** (Ctrl+O): explorador integrado de `.ws` / `.wsc`
 - **Estado -> Guardar/Cargar estado 0..9**: 10 ranuras en `saves/slotNN.sts`
 - **Emulacion -> Reiniciar / Pausa** (Espacio)
-- **Opciones -> Video**: zoom 1x..4x, volteo de la ventana entera (F1),
-  orientacion de la pantalla (manual, vertical u horizontal) y modo 60 Hz
+- **Opciones -> Video**: zoom 1x..4x, alternar horizontal/vertical (**F1**,
+  como girar la consola), orientacion de la pantalla (manual, vertical u
+  horizontal) y modo 60 Hz
 - **Opciones -> Sonido**: silencio general y canal a canal (1..4, ruido, PCM y
   DMA); requiere el nucleo de `make core`
-- **Opciones -> Controles**: remapeo de botones y restauracion de los valores
-  por defecto
+- **Opciones -> Controles**: remapeo de botones, remapeo de la cruceta al rotar
+  (automatico, solo horizontal, solo vertical) y restauracion de los valores por
+  defecto
 - **Ayuda -> Acerca de...**: version del emulador
 - ROM por linea de comandos: `WsCampReborn juego.ws`
 
@@ -157,13 +175,14 @@ perder fluidez; no hace falta para la velocidad, que ya es correcta.
 
 ```sh
 make core                  # nucleo con control por canal, en lib/
-make test ROM=juego.ws     # video, volteo, rotacion, sonido y autocomprobacion
+make test ROM=juego.ws     # video, escalado, rotacion, sonido y autocomprobacion
 ```
 
-`make test` comprueba la conversion de color y las cuatro rotaciones, que el
-volteo gira la ventana entera, que la orientacion llega al nucleo (224x144 en
-horizontal y 144x224 en vertical), que las opciones de canal llegan al nucleo
-parcheado y ejecuta una autocomprobacion completa (carga una ROM, guarda un
+`make test` comprueba la conversion de color, las cuatro rotaciones y el
+escalado (que la imagen tambien crece al maximizar, no solo se reduce), que la
+orientacion llega al nucleo (224x144 en horizontal y 144x224 en vertical), que
+el remapeo de la cruceta cambia al girar, que las opciones de canal llegan al
+nucleo parcheado y ejecuta una autocomprobacion completa (carga una ROM, guarda un
 estado, avanza y lo vuelve a cargar). Sin `ROM=` se omiten las pruebas que
 necesitan un juego.
 
@@ -184,7 +203,7 @@ va a velocidad real aunque el monitor sea de 60 Hz.
 | Z | B |
 | Enter | Start |
 | Retroceso | Select |
-| F1 | Voltear la ventana entera (configurable) |
+| F1 | Alternar horizontal / vertical, como girar la consola (configurable) |
 | Ctrl+O | Abrir ROM |
 | Espacio | Pausa |
 

@@ -1,7 +1,8 @@
 name: build
 
 # Compila para Linux x64, Windows x86, Windows x64, macOS x64 y macOS arm64, y
-# publica los binarios en el release "latest".
+# publica los binarios en el release "latest". En Windows la interfaz es nativa
+# (Win32 + GDI), asi que esos paquetes no llevan SDL.
 #
 # La version sale de src/version.h; para cambiarla, edita ese fichero (o lanza
 # el workflow con el input "version").
@@ -91,15 +92,12 @@ jobs:
         run: brew install sdl2
 
       # --- Windows cruzado desde Linux ---
+      # Windows no usa SDL: la interfaz es nativa (GDI + menu del sistema).
       - name: Dependencias (MinGW)
         if: matrix.kind == 'mingw'
         run: |
           sudo apt-get update
           sudo apt-get install -y g++-mingw-w64-x86-64 g++-mingw-w64-i686 zip
-          curl -sL -o /tmp/sdl2.tar.gz \
-            https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz
-          sudo mkdir -p /opt/sdl2-mingw
-          sudo tar xzf /tmp/sdl2.tar.gz -C /opt/sdl2-mingw --strip-components=1
 
       # El nucleo se compila desde fuente para incluir el control por canal de
       # sonido que ofrece el menu de Opciones.
@@ -143,8 +141,6 @@ jobs:
           mkdir -p "dist/${OUT}"
           if [ "${{ matrix.kind }}" = "mingw" ]; then
             cp WsCampReborn.exe "dist/${OUT}/"
-            # SDL2.dll junto al ejecutable
-            cp "/opt/sdl2-mingw/${{ matrix.cross }}-w64-mingw32/bin/SDL2.dll" "dist/${OUT}/"
             cp lib/mednafen_wswan_libretro.dll "dist/${OUT}/"
           else
             cp WsCampReborn "dist/${OUT}/"
@@ -215,8 +211,9 @@ jobs:
 
           Version compilada desde \`src/version.h\` (commit ${GITHUB_SHA}).
 
-          Cada paquete incluye el nucleo libretro con control por canal de sonido
-          y, en Windows, \`SDL2.dll\`. En Linux y macOS hace falta SDL2 del sistema.
+          Cada paquete incluye el nucleo libretro con control por canal de sonido.
+          En Windows la interfaz es nativa (no necesita SDL); en Linux y macOS
+          hace falta SDL2 del sistema.
           EOF
 
           # Crea o mueve el tag "latest" al commit actual.

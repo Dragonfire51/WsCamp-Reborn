@@ -12,7 +12,6 @@
 //
 // Uso: sound_test <nucleo> <rom>
 
-#include <SDL.h>
 
 #include <cstdio>
 #include <cstring>
@@ -104,16 +103,10 @@ int main(int argc, char **argv) {
     const std::string core_path = argv[1];
     const std::string rom_path  = argv[2];
 
-    if (SDL_Init(SDL_INIT_EVENTS) != 0) {
-        fprintf(stderr, "SDL_Init fallo: %s\n", SDL_GetError());
-        return 1;
-    }
-
     WsCore core;
     if (!core.Load(core_path)) {
         fprintf(stderr, "no se pudo cargar el nucleo: %s\n",
                 core.last_error().c_str());
-        SDL_Quit();
         return 1;
     }
 
@@ -131,7 +124,6 @@ int main(int argc, char **argv) {
     if (f == nullptr) {
         fprintf(stderr, "no se pudo abrir la ROM: %s\n", rom_path.c_str());
         core.retro_deinit();
-        SDL_Quit();
         return 1;
     }
     fseek(f, 0, SEEK_END);
@@ -143,7 +135,6 @@ int main(int argc, char **argv) {
     if (rd != rom.size()) {
         fprintf(stderr, "no se pudo leer la ROM\n");
         core.retro_deinit();
-        SDL_Quit();
         return 1;
     }
 
@@ -154,7 +145,6 @@ int main(int argc, char **argv) {
     if (!core.retro_load_game(&info)) {
         fprintf(stderr, "no se pudo cargar la ROM en el nucleo\n");
         core.retro_deinit();
-        SDL_Quit();
         return 1;
     }
 
@@ -166,7 +156,6 @@ int main(int argc, char **argv) {
         printf("SOUNDTEST: OMITIDO (el nucleo no tiene control por canal; "
                "compila con 'make core' para probarlo)\n");
         core.retro_deinit();
-        SDL_Quit();
         return 0;
     }
 
@@ -177,7 +166,6 @@ int main(int argc, char **argv) {
               flags[4] == 0 && flags[5] == 1 && flags[6] == 1;
 
     core.retro_deinit();
-    SDL_Quit();
 
     printf(ok ? "SOUNDTEST: OK\n" : "SOUNDTEST: FALLO\n");
     return ok ? 0 : 1;
